@@ -169,6 +169,8 @@ GGML_API struct ggml_moe_cache_api ggml_moe_cache_get(const void * owner);
 GGML_API struct ggml_moe_cache_api ggml_moe_cache_active(void);
 GGML_API void ggml_backend_sched_set_moe_cache(
         ggml_backend_sched_t sched, enum ggml_moe_cache_mode mode, size_t budget_mib);
+GGML_API void ggml_moe_cache_set_profile(int profile_id);
+GGML_API int  ggml_moe_cache_get_profile(void);
 
 #ifdef __cplusplus
 }

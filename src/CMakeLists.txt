@@ -45,6 +45,7 @@ set(LLAMA_CORE_SOURCES
     llama-vocab.cpp
     unicode-data.cpp
     unicode.cpp
+    moe-profile-cache.cpp
 )
 
 add_library(llama

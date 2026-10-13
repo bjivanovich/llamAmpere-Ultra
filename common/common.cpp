@@ -13,6 +13,7 @@
 #include "sampling.h"
 #include "speculative.h"
 #include "unicode.h"
+#include "../src/moe-profile-cache.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -1590,6 +1591,15 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
     }
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
+
+    if (params.moe_profile_cache_enabled || !params.moe_profile.empty()) {
+        moe_profile_cache::instance().configure(
+            true,
+            params.moe_profile,
+            params.moe_vram_budget_mb,
+            static_cast<moe_cache_policy_type>(params.moe_cache_policy)
+        );
+    }
 
     if (params.ctx_shift && !llama_memory_can_shift(llama_get_memory(lctx))) {
         COM_WRN("%s", "KV cache shifting is not supported for this context, disabling KV cache shifting\n");

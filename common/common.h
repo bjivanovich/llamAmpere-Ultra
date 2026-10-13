@@ -695,6 +695,12 @@ struct common_params {
     bool no_host           = false; // bypass host buffer allowing extra buffers to be used
     bool load_mtp          = false; // load MTP/NextN layers
 
+    // MoE Expert Profile Cache parameters
+    bool        moe_profile_cache_enabled = false;
+    std::string moe_profile               = "";
+    int32_t     moe_vram_budget_mb        = 8192;
+    int32_t     moe_cache_policy          = 0; // 0=PROFILE_PRIORITY, 1=DYNAMIC_HYBRID, 2=DYNAMIC_LRU
+
     bool single_turn       = false; // single turn chat conversation
 
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K

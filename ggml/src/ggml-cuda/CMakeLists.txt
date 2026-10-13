@@ -69,6 +69,7 @@ if (CUDAToolkit_FOUND)
         endif()
     endif()
 
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler")
     enable_language(CUDA)
 
     if (GGML_CUDA_CCCL_VERSION)

@@ -4860,6 +4860,31 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_SAMPLING"));
     add_opt(common_arg(
+        {"--moe-profile"}, "{python,rust,cpp,typescript,agent,general}",
+        "MoE Expert Profile to prioritize in VRAM cache (default: general). "
+        "Pins domain-specific hot experts for higher hit rates during coding/agent workflows.",
+        [](common_params & params, const std::string & value) {
+            params.moe_profile = value;
+            params.moe_profile_cache_enabled = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_MOE_PROFILE"));
+    add_opt(common_arg(
+        {"--moe-vram-budget-mb"}, "MB",
+        "VRAM budget in megabytes dedicated to the MoE hot expert cache pool (default: 8192 MB / 8 GB)",
+        [](common_params & params, int value) {
+            params.moe_vram_budget_mb = value;
+            params.moe_profile_cache_enabled = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_MOE_VRAM_BUDGET_MB"));
+    add_opt(common_arg(
+        {"--moe-cache-policy"}, "{0,1,2}",
+        "MoE cache eviction policy: 0 = Profile Priority (strict pinning), 1 = Dynamic Hybrid (weighted LRU), 2 = Dynamic LRU (default: 0)",
+        [](common_params & params, int value) {
+            params.moe_cache_policy = value;
+            params.moe_profile_cache_enabled = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_MOE_CACHE_POLICY"));
+    add_opt(common_arg(
         {"--spec-draft-device", "-devd", "--device-draft"}, "<dev1,dev2,..>",
         "comma-separated list of devices to use for offloading the draft model (none = don't offload, default: follows --device)\n"
         "use --list-devices to see a list of available devices",

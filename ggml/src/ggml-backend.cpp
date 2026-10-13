@@ -57,6 +57,16 @@ ggml_moe_cache_api ggml_moe_cache_get(const void * owner) {
     return ggml_moe_cache_api{};
 }
 
+static std::atomic<int> g_moe_profile_active_id{0};
+
+void ggml_moe_cache_set_profile(int profile_id) {
+    g_moe_profile_active_id.store(profile_id, std::memory_order_relaxed);
+}
+
+int ggml_moe_cache_get_profile(void) {
+    return g_moe_profile_active_id.load(std::memory_order_relaxed);
+}
+
 // The provider table the current thread is executing under. Set by the
 // scheduler scope while a graph with a cache session runs; the CPU backend
 // reads it to reach the session's provider callbacks.

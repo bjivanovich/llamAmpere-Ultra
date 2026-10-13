@@ -44,6 +44,45 @@ static void moe_cache_register_stub(const void * owner) {
 #include <utility>
 #include <vector>
 
+static inline bool moe_profile_cache_is_active(void) {
+    return ggml_moe_cache_get_profile() > 0;
+}
+
+static inline bool moe_profile_cache_expert_pinned(int32_t expert_idx) {
+    const int prof = ggml_moe_cache_get_profile();
+    if (prof <= 0) return false;
+    switch (prof) {
+        case 1: // python
+            for (int e : {0, 1, 4, 7, 12, 15, 18, 22, 28, 31}) {
+                if (expert_idx == e) return true;
+            }
+            break;
+        case 2: // rust
+            for (int e : {1, 2, 5, 8, 11, 16, 20, 24, 29, 30}) {
+                if (expert_idx == e) return true;
+            }
+            break;
+        case 3: // cpp
+            for (int e : {0, 2, 6, 9, 13, 17, 21, 25, 27, 31}) {
+                if (expert_idx == e) return true;
+            }
+            break;
+        case 4: // typescript
+            for (int e : {0, 1, 3, 6, 8, 12, 14, 19, 22, 27}) {
+                if (expert_idx == e) return true;
+            }
+            break;
+        case 5: // agent
+            for (int e : {0, 3, 7, 10, 14, 19, 23, 26, 28, 30}) {
+                if (expert_idx == e) return true;
+            }
+            break;
+        default:
+            break;
+    }
+    return false;
+}
+
 #define MOE_CACHE_LOG(...) GGML_LOG_INFO(__VA_ARGS__)
 
 static constexpr int    moe_cache_cc_forced_min               = 700;
@@ -2386,9 +2425,12 @@ static int moe_cache_lookup_or_queue_locked(
     const int initial_admit_after =
         pool.covers_all_entries && !session.config.admit_after_explicit
             ? 1 : session.config.admit_after;
-    const int admit_after = pool.free_slots.empty()
+    int admit_after = pool.free_slots.empty()
         ? std::max(initial_admit_after, session.config.readmit_after)
         : initial_admit_after;
+    if (moe_profile_cache_is_active() && moe_profile_cache_expert_pinned(expert)) {
+        admit_after = 1; // Strata profile optimization: admit domain experts immediately without lag
+    }
     if (demand->count < admit_after) {
         device.admission_skips++;
         return -1;
@@ -2412,6 +2454,10 @@ static int moe_cache_lookup_or_queue_locked(
         for (int c = pool.lru_head; c >= 0; c = pool.slots[c].next) {
             moe_cache_slot & s = pool.slots[c];
             if (s.readers > 0) {
+                continue;
+            }
+            if (moe_profile_cache_is_active() && moe_profile_cache_expert_pinned(s.key.expert)) {
+                // Strata profile protection: preserve domain experts in VRAM while any non-pinned slot can be evicted
                 continue;
             }
             if (fallback < 0) {
