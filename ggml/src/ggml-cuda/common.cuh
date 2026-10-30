@@ -1214,6 +1214,59 @@ struct ggml_cuda_type_traits<GGML_TYPE_IQ3_S> {
     static constexpr int bs = sizeof(block_iq3_s);
 };
 
+// Trellis types (TQ2_T, TQK6, TQK7, TQP5/6/7): 128 weights per block, 32 ints of 4 weights
+#define QR_TRELLIS 4
+#define QI_TRELLIS (QK_TQK/QR_TRELLIS)
+static_assert(QK_TQ2_T == QK_TQK, "trellis block sizes differ");
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQ2_T> {
+    static constexpr int qk = QK_TQ2_T;
+    static constexpr int qr = QR_TRELLIS;
+    static constexpr int qi = QI_TRELLIS;
+    static constexpr int bs = sizeof(block_tq2_t);
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQK6> {
+    static constexpr int qk = QK_TQK;
+    static constexpr int qr = QR_TRELLIS;
+    static constexpr int qi = QI_TRELLIS;
+    static constexpr int bs = sizeof(block_tqk6);
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQK7> {
+    static constexpr int qk = QK_TQK;
+    static constexpr int qr = QR_TRELLIS;
+    static constexpr int qi = QI_TRELLIS;
+    static constexpr int bs = sizeof(block_tqk7);
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQP5> {
+    static constexpr int qk = QK_TQP;
+    static constexpr int qr = QR_TRELLIS;
+    static constexpr int qi = QI_TRELLIS;
+    static constexpr int bs = sizeof(block_tqp5);
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQP6> {
+    static constexpr int qk = QK_TQP;
+    static constexpr int qr = QR_TRELLIS;
+    static constexpr int qi = QI_TRELLIS;
+    static constexpr int bs = sizeof(block_tqp6);
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQP7> {
+    static constexpr int qk = QK_TQP;
+    static constexpr int qr = QR_TRELLIS;
+    static constexpr int qi = QI_TRELLIS;
+    static constexpr int bs = sizeof(block_tqp7);
+};
+
 //////////////////////
 
 struct ggml_cuda_device_info {

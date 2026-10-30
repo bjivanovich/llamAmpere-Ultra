@@ -454,7 +454,13 @@ extern "C" {
         GGML_TYPE_TQ5_0   = 59, // TurboQuant 5-bit KV cache: WHT + 5-bit PolarQuant (runtime-only KV type)
         GGML_TYPE_PQ2_0   = 142, // Prism group-128 ternary weights
         GGML_TYPE_PTQ1_0  = 143, // Prism packed group-128 ternary weights
-        GGML_TYPE_COUNT   = 144,
+        GGML_TYPE_TQ2_T   = 144,
+        GGML_TYPE_TQK6    = 145,
+        GGML_TYPE_TQK7    = 146,
+        GGML_TYPE_TQP5    = 147,
+        GGML_TYPE_TQP6    = 148,
+        GGML_TYPE_TQP7    = 149,
+        GGML_TYPE_COUNT   = 150,
     };
 
     // [TAG_GGML_PREC]
@@ -512,6 +518,12 @@ extern "C" {
         GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
         GGML_FTYPE_MOSTLY_PQ2_0  = 128, // except 1d tensors
         GGML_FTYPE_MOSTLY_PTQ1_0 = 129, // except 1d tensors
+        GGML_FTYPE_MOSTLY_TQ2_T  = 130, // except 1d tensors (trellis-coded, group 128)
+        GGML_FTYPE_MOSTLY_TQK6   = 131, // except 1d tensors (trellis-coded K=6, group 128)
+        GGML_FTYPE_MOSTLY_TQK7   = 132, // except 1d tensors (trellis-coded K=7, group 128)
+        GGML_FTYPE_MOSTLY_TQP5   = 133, // except 1d tensors (pair trellis K=5, group 128)
+        GGML_FTYPE_MOSTLY_TQP6   = 134, // except 1d tensors (pair trellis K=6, group 128)
+        GGML_FTYPE_MOSTLY_TQP7   = 135, // except 1d tensors (pair trellis K=7, group 128)
         GGML_FTYPE_MOSTLY_Q8_CR   = 29, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q5_CR   = 30, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q6_CR   = 31, // except 1d tensors

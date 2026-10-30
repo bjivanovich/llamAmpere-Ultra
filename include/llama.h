@@ -161,6 +161,12 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_PQ2_0     = 141, // except 1d tensors (Prism group-128 Q2_0; matches published PQ2_0 ggufs)
         LLAMA_FTYPE_MOSTLY_PQ2_0_LEGACY = 142, // pre-rename value for the same format, still found in published ggufs
         LLAMA_FTYPE_MOSTLY_PTQ1_0    = 143, // except 1d tensors (Prism group-128 ternary, 1.75 bpw)
+        LLAMA_FTYPE_MOSTLY_TQ2_T        = 144, // except 1d tensors (trellis-coded, group 128, 2.125 bpw)
+        LLAMA_FTYPE_MOSTLY_TQK6         = 145, // except 1d tensors (trellis-coded K=6, group 128, 1.625 bpw)
+        LLAMA_FTYPE_MOSTLY_TQK7         = 146, // except 1d tensors (trellis-coded K=7, group 128, 1.875 bpw)
+        LLAMA_FTYPE_MOSTLY_TQP5         = 147, // except 1d tensors (pair trellis K=5, group 128, 2.625 bpw)
+        LLAMA_FTYPE_MOSTLY_TQP6         = 148, // except 1d tensors (pair trellis K=6, group 128, 3.125 bpw)
+        LLAMA_FTYPE_MOSTLY_TQP7         = 149, // except 1d tensors (pair trellis K=7, group 128, 3.625 bpw)
         LLAMA_FTYPE_MOSTLY_Q8_CR         = 42, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_TQ3_1S        = 43, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_TQ4_1S        = 44, // except 1d tensors

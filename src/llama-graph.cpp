@@ -1275,9 +1275,10 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
         mctx->get_attn()->set_input_sj_kvarn_desc(inp_attn->self_sj_kvarn_desc_edge, ubatch, 1);
     }
 
-    inp_rs->fill_s_copy(mctx->get_recr());
-
-    mctx->get_recr()->consume_replay(inp_rs->span_new);
+    if (inp_rs && mctx->get_recr()) {
+        inp_rs->fill_s_copy(mctx->get_recr());
+        mctx->get_recr()->consume_replay(inp_rs->span_new);
+    }
 }
 
 bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
@@ -1296,21 +1297,18 @@ bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
         res &= inp_attn->sj_kvarn_n_kv_streams == mctx->get_attn()->get_sj_kvarn_n_kv_streams();
     }
 
-    res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
-
-    res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
-
-    res &= inp_rs->head == mctx->get_recr()->get_head();
-    res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
-
-    // DRC phase 2: same guard as llm_graph_input_rs::can_reuse -- a changed replay length means a
-    // differently-shaped reconstruction subtree, which reused topology cannot express.
-    res &= inp_rs->replay_len == mctx->get_recr()->get_replay_len();
-    res &= inp_rs->ckpt_span  == mctx->get_recr()->get_ckpt_span();
-    res &= inp_rs->s_stale    == mctx->get_recr()->get_s_stale();
-    res &= inp_rs->snap_shift == mctx->get_recr()->get_snap_shift();
-    res &= inp_rs->n_written  == mctx->get_recr()->get_n_written();
-    res &= inp_rs->n_older    == mctx->get_recr()->get_n_older();
+    if (inp_rs && mctx->get_recr()) {
+        res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
+        res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
+        res &= inp_rs->head == mctx->get_recr()->get_head();
+        res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
+        res &= inp_rs->replay_len == mctx->get_recr()->get_replay_len();
+        res &= inp_rs->ckpt_span  == mctx->get_recr()->get_ckpt_span();
+        res &= inp_rs->s_stale    == mctx->get_recr()->get_s_stale();
+        res &= inp_rs->snap_shift == mctx->get_recr()->get_snap_shift();
+        res &= inp_rs->n_written  == mctx->get_recr()->get_n_written();
+        res &= inp_rs->n_older    == mctx->get_recr()->get_n_older();
+    }
 
     return res;
 }
@@ -1323,9 +1321,10 @@ void llm_graph_input_mem_hybrid_k::set_input(const llama_ubatch * ubatch) {
 
     mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
 
-    inp_rs->fill_s_copy(mctx->get_recr());
-
-    mctx->get_recr()->consume_replay(inp_rs->span_new);
+    if (inp_rs && mctx->get_recr()) {
+        inp_rs->fill_s_copy(mctx->get_recr());
+        mctx->get_recr()->consume_replay(inp_rs->span_new);
+    }
 }
 
 bool llm_graph_input_mem_hybrid_k::can_reuse(const llm_graph_params & params) {
@@ -1339,21 +1338,18 @@ bool llm_graph_input_mem_hybrid_k::can_reuse(const llm_graph_params & params) {
 
     res &= can_reuse_kq_mask(inp_attn->self_kq_mask, mctx->get_attn(), params.ubatch, params.cparams);
 
-    res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
-
-    res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
-
-    res &= inp_rs->head == mctx->get_recr()->get_head();
-    res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
-
-    // DRC phase 2: same guard as llm_graph_input_rs::can_reuse -- a changed replay length means a
-    // differently-shaped reconstruction subtree, which reused topology cannot express.
-    res &= inp_rs->replay_len == mctx->get_recr()->get_replay_len();
-    res &= inp_rs->ckpt_span  == mctx->get_recr()->get_ckpt_span();
-    res &= inp_rs->s_stale    == mctx->get_recr()->get_s_stale();
-    res &= inp_rs->snap_shift == mctx->get_recr()->get_snap_shift();
-    res &= inp_rs->n_written  == mctx->get_recr()->get_n_written();
-    res &= inp_rs->n_older    == mctx->get_recr()->get_n_older();
+    if (inp_rs && mctx->get_recr()) {
+        res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
+        res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
+        res &= inp_rs->head == mctx->get_recr()->get_head();
+        res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
+        res &= inp_rs->replay_len == mctx->get_recr()->get_replay_len();
+        res &= inp_rs->ckpt_span  == mctx->get_recr()->get_ckpt_span();
+        res &= inp_rs->s_stale    == mctx->get_recr()->get_s_stale();
+        res &= inp_rs->snap_shift == mctx->get_recr()->get_snap_shift();
+        res &= inp_rs->n_written  == mctx->get_recr()->get_n_written();
+        res &= inp_rs->n_older    == mctx->get_recr()->get_n_older();
+    }
 
     return res;
 }
@@ -1397,9 +1393,10 @@ void llm_graph_input_mem_hybrid_iswa::set_input(const llama_ubatch * ubatch) {
         attn_ctx->get_swa()->set_input_v_rot(inp_attn->self_v_rot_swa);
     }
 
-    inp_rs->fill_s_copy(mctx->get_recr());
-
-    mctx->get_recr()->consume_replay(inp_rs->span_new);
+    if (inp_rs && mctx->get_recr()) {
+        inp_rs->fill_s_copy(mctx->get_recr());
+        mctx->get_recr()->consume_replay(inp_rs->span_new);
+    }
 }
 
 bool llm_graph_input_mem_hybrid_iswa::can_reuse(const llm_graph_params & params) {
@@ -1427,21 +1424,18 @@ bool llm_graph_input_mem_hybrid_iswa::can_reuse(const llm_graph_params & params)
 
     res &= can_reuse_kq_mask(inp_attn->self_kq_mask_swa, attn_ctx->get_swa(), params.ubatch, params.cparams);
 
-    res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
-
-    res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
-
-    res &= inp_rs->head == mctx->get_recr()->get_head();
-    res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
-
-    // DRC phase 2: same guard as llm_graph_input_rs::can_reuse -- a changed replay length means a
-    // differently-shaped reconstruction subtree, which reused topology cannot express.
-    res &= inp_rs->replay_len == mctx->get_recr()->get_replay_len();
-    res &= inp_rs->ckpt_span  == mctx->get_recr()->get_ckpt_span();
-    res &= inp_rs->s_stale    == mctx->get_recr()->get_s_stale();
-    res &= inp_rs->snap_shift == mctx->get_recr()->get_snap_shift();
-    res &= inp_rs->n_written  == mctx->get_recr()->get_n_written();
-    res &= inp_rs->n_older    == mctx->get_recr()->get_n_older();
+    if (inp_rs && mctx->get_recr()) {
+        res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
+        res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
+        res &= inp_rs->head == mctx->get_recr()->get_head();
+        res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
+        res &= inp_rs->replay_len == mctx->get_recr()->get_replay_len();
+        res &= inp_rs->ckpt_span  == mctx->get_recr()->get_ckpt_span();
+        res &= inp_rs->s_stale    == mctx->get_recr()->get_s_stale();
+        res &= inp_rs->snap_shift == mctx->get_recr()->get_snap_shift();
+        res &= inp_rs->n_written  == mctx->get_recr()->get_n_written();
+        res &= inp_rs->n_older    == mctx->get_recr()->get_n_older();
+    }
 
     return res;
 }
@@ -4355,6 +4349,9 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
            ggml_context * ctx0,
      const llama_ubatch & ubatch,
     const llama_memory_recurrent_context * mctx_cur) {
+    if (!mctx_cur) {
+        return nullptr;
+    }
 
     auto inp = std::make_unique<llm_graph_input_rs>(mctx_cur);
 
@@ -4497,9 +4494,11 @@ ggml_tensor * llm_graph_context::build_rwkv_token_shift_store(
 
 llm_graph_input_mem_hybrid * llm_graph_context::build_inp_mem_hybrid() const {
     const auto * mctx_cur = static_cast<const llama_memory_hybrid_context *>(mctx);
+    if (mctx_cur) {
+    }
 
-    auto inp_rs   = build_rs_inp_impl     (ctx0, ubatch, mctx_cur->get_recr());
-    auto inp_attn = build_attn_inp_kv_impl(ctx0, ubatch, hparams, cparams, mctx_cur->get_attn());
+    auto inp_rs   = mctx_cur ? build_rs_inp_impl     (ctx0, ubatch, mctx_cur->get_recr()) : nullptr;
+    auto inp_attn = build_attn_inp_kv_impl(ctx0, ubatch, hparams, cparams, mctx_cur ? mctx_cur->get_attn() : nullptr);
 
     auto inp = std::make_unique<llm_graph_input_mem_hybrid>(cparams, std::move(inp_attn), std::move(inp_rs), mctx_cur);
 

@@ -9866,8 +9866,24 @@ static void ggml_compute_forward_flash_attn_ext_sj_kvarn(
                     kr = (const char *) k->data + (size_t) (S + cap)*k->nb[1] + (size_t) (p*hkv + ikv)*D*sizeof(ggml_fp16_t);
                     vr = (const char *) v->data + (size_t) (S + cap)*v->nb[1] + (size_t) (p*hkv + ikv)*D*sizeof(ggml_fp16_t);
                 }
-                ggml_get_type_traits(f16_sink ? GGML_TYPE_F16 : k->type)->to_float(kr, krow.data(), D);
-                ggml_get_type_traits(f16_sink ? GGML_TYPE_F16 : v->type)->to_float(vr, vrow.data(), D);
+                const enum ggml_type ktype = f16_sink ? GGML_TYPE_F16 : k->type;
+                const enum ggml_type vtype = f16_sink ? GGML_TYPE_F16 : v->type;
+                const ggml_to_float_t k_to_float = ggml_get_type_traits(ktype)->to_float;
+                const ggml_to_float_t v_to_float = ggml_get_type_traits(vtype)->to_float;
+                if (k_to_float) {
+                    k_to_float(kr, krow.data(), D);
+                } else if (ktype == GGML_TYPE_F32) {
+                    memcpy(krow.data(), kr, D*sizeof(float));
+                } else {
+                    memset(krow.data(), 0, D*sizeof(float));
+                }
+                if (v_to_float) {
+                    v_to_float(vr, vrow.data(), D);
+                } else if (vtype == GGML_TYPE_F32) {
+                    memcpy(vrow.data(), vr, D*sizeof(float));
+                } else {
+                    memset(vrow.data(), 0, D*sizeof(float));
+                }
             }
             float s = 0.0f;
             for (int d = 0; d < D; ++d) {
@@ -12121,7 +12137,16 @@ void ggml_compute_forward_sj_kvarn_seal(
             const size_t rb = ggml_row_size(GGML_TYPE_TURBO4_0, D);
             for (int t = 0; t < G; ++t) {
                 for (int is_v = 0; is_v < 2; ++is_v) {
-                    ggml_get_type_traits(k->type)->to_float((is_v ? vp : kp) + t*k->nb[1], values.data(), D);
+                    const enum ggml_type cur_type = is_v ? v->type : k->type;
+                    const char * src_ptr = (is_v ? vp : kp) + t*(is_v ? v->nb[1] : k->nb[1]);
+                    const ggml_to_float_t cur_to_float = ggml_get_type_traits(cur_type)->to_float;
+                    if (cur_to_float) {
+                        cur_to_float(src_ptr, values.data(), D);
+                    } else if (cur_type == GGML_TYPE_F32) {
+                        memcpy(values.data(), src_ptr, D*sizeof(float));
+                    } else {
+                        memset(values.data(), 0, D*sizeof(float));
+                    }
                     for (float & value : values) value = GGML_FP16_TO_FP32(GGML_FP32_TO_FP16(value));
                     quantize_row_turbo4_0_rotated_ref(values.data(), (block_turbo4_0 *) (record + (is_v*G+t)*rb), D);
                 }
@@ -12134,9 +12159,24 @@ void ggml_compute_forward_sj_kvarn_seal(
             return;
         }
         for (int t = 0; t < G; ++t) {
-            ggml_get_type_traits(k->type)->to_float(kp + t*k->nb[1], row.data(), D);
+            const ggml_to_float_t k_to_float = ggml_get_type_traits(k->type)->to_float;
+            if (k_to_float) {
+                k_to_float(kp + t*k->nb[1], row.data(), D);
+            } else if (k->type == GGML_TYPE_F32) {
+                memcpy(row.data(), kp + t*k->nb[1], D*sizeof(float));
+            } else {
+                memset(row.data(), 0, D*sizeof(float));
+            }
             ggml_fp32_to_fp16_row(row.data(), kstage.data() + t*D, D);
-            ggml_get_type_traits(v->type)->to_float(vp + t*v->nb[1], row.data(), D);
+
+            const ggml_to_float_t v_to_float = ggml_get_type_traits(v->type)->to_float;
+            if (v_to_float) {
+                v_to_float(vp + t*v->nb[1], row.data(), D);
+            } else if (v->type == GGML_TYPE_F32) {
+                memcpy(row.data(), vp + t*v->nb[1], D*sizeof(float));
+            } else {
+                memset(row.data(), 0, D*sizeof(float));
+            }
             ggml_fp32_to_fp16_row(row.data(), vstage.data() + t*D, D);
         }
         ggml_sj_kvarn_dump_group(kstage.data(), vstage.data(), D, D, G, head, k->name);

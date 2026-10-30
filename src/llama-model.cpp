@@ -1493,6 +1493,7 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
             case LLM_ARCH_QWEN35:
             case LLM_ARCH_QWEN35MOE:
             case LLM_ARCH_QWEN3NEXT:
+            case LLM_ARCH_QWEN4EXP:
                 break;
             default:
                 throw std::runtime_error(format(
@@ -2732,6 +2733,9 @@ void llama_model::print_info() const {
 }
 
 ggml_backend_dev_t llama_model::dev_layer(int il) const {
+    if (il < 0 || (size_t)il >= pimpl->dev_layer.size()) {
+        return pimpl->dev_output.dev;
+    }
     return pimpl->dev_layer.at(il).dev;
 }
 
@@ -2780,8 +2784,11 @@ static ggml_backend_buffer_type_t select_buft(const buft_list_t & buft_list, con
 }
 
 ggml_backend_buffer_type_t llama_model::select_buft(int il) const {
+    const buft_list_t * bl = (il >= 0 && (size_t)il < pimpl->dev_layer.size())
+        ? pimpl->dev_layer.at(il).buft_list
+        : pimpl->dev_output.buft_list;
     return ::select_buft(
-            *pimpl->dev_layer.at(il).buft_list,
+            *bl,
             [&](ggml_context * ctx) {
                 ggml_tensor * cur = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hparams.n_embd);
                 ggml_tensor * layer_dir = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hparams.n_embd);

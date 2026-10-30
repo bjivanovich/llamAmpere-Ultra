@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llamAmpere Ultra - Monitor en Tiempo Real</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-orange: #d29922;
+    --accent-red: #f85149;
+    --text: #c9d1d9;
+    --text-bright: #ffffff;
+    --font: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 100vh;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 12px;
+  }
+  h1 { font-size: 20px; color: var(--text-bright); font-weight: 600; letter-spacing: 0.5px; }
+  .badge {
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .badge-online { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); border: 1px solid var(--accent-green); }
+  .badge-busy { background: rgba(210, 153, 34, 0.15); color: var(--accent-orange); border: 1px solid var(--accent-orange); }
+
+  /* Dashboard Cards */
+  .grid-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .card-label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .card-val { font-size: 28px; font-weight: 700; color: var(--text-bright); font-feature-settings: "tnum"; }
+  .card-val.speed { color: var(--accent-green); }
+  .card-val.speed-fast { color: #2ea043; text-shadow: 0 0 10px rgba(63, 185, 80, 0.4); }
+  .card-sub { font-size: 11px; color: #8b949e; }
+
+  /* Canvas chart */
+  .chart-container {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    position: relative;
+    height: 180px;
+  }
+  canvas { width: 100%; height: 100%; display: block; }
+
+  /* Controls */
+  .controls-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .preset-bar {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  button {
+    background: #21262d;
+    color: var(--text-bright);
+    border: 1px solid var(--border);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 0.15s ease;
+  }
+  button:hover { background: #30363d; border-color: #8b949e; }
+  button.btn-primary { background: #238636; border-color: #2ea043; }
+  button.btn-primary:hover { background: #2ea043; }
+  button.btn-stop { background: #da3633; border-color: #f85149; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  textarea {
+    background: #0d1117;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    font-family: inherit;
+    font-size: 13px;
+    min-height: 70px;
+    resize: vertical;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+
+  /* Output viewer */
+  .output-container {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 250px;
+    overflow: hidden;
+  }
+  .tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    background: #0d1117;
+  }
+  .tab-btn {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 10px 16px;
+    color: #8b949e;
+  }
+  .tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
+  }
+  .tab-content {
+    padding: 14px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-y: auto;
+    max-height: 400px;
+    flex: 1;
+    color: #e6edf3;
+  }
+  .think-text { color: #8b949e; font-style: italic; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>llamAmpere Ultra - Telemetria en Tiempo Real</h1>
+    <span style="font-size: 12px; color: #8b949e;">Qwen3.8-Flash-Next MoE | Endpoint: http://127.0.0.1:8080</span>
+  </div>
+  <div id="statusBadge" class="badge badge-online">Servidor Conectado</div>
+</header>
+
+<div class="grid-metrics">
+  <div class="card">
+    <div class="card-label">Velocidad Instantanea</div>
+    <div class="card-val speed" id="metricInstantToks">0.0 <span style="font-size: 14px;">tok/s</span></div>
+    <div class="card-sub" id="metricLatency">Latencia: -- ms/tok</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Velocidad Promedio</div>
+    <div class="card-val" id="metricAvgToks">0.0 <span style="font-size: 14px;">tok/s</span></div>
+    <div class="card-sub" id="metricPeak">Pico maximo: 0.0 tok/s</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Tokens Generados</div>
+    <div class="card-val" id="metricTokens">0</div>
+    <div class="card-sub" id="metricElapsed">Tiempo: 0.0 s</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Prompt Evaluation (PP)</div>
+    <div class="card-val" style="color: var(--accent);" id="metricPP">-- <span style="font-size: 14px;">tok/s</span></div>
+    <div class="card-sub" id="metricTTFT">TTFT: -- ms</div>
+  </div>
+</div>
+
+<div class="chart-container">
+  <canvas id="speedChart"></canvas>
+</div>
+
+<div class="controls-card">
+  <div class="preset-bar">
+    <span style="font-size: 12px; color: #8b949e; align-self: center; margin-right: 4px;">Presets de prueba:</span>
+    <button type="button" onclick="loadPreset('code')">Codigo Estructurado (Especulativo >50 t/s)</button>
+    <button type="button" onclick="loadPreset('reasoning')">Razonamiento Libre (~20-25 t/s)</button>
+    <button type="button" onclick="loadPreset('game')">Loop de Juego (Canvas 2D)</button>
+  </div>
+  <textarea id="promptInput" placeholder="Escribe un prompt para evaluar la velocidad de generacion..."></textarea>
+  <div style="display: flex; gap: 8px;">
+    <button id="btnGenerate" class="btn-primary" onclick="startGeneration()">Enviar y Medir en Vivo</button>
+    <button id="btnStop" class="btn-stop" onclick="stopGeneration()" disabled>Detener</button>
+    <button onclick="clearAll()">Limpiar</button>
+  </div>
+</div>
+
+<div class="output-container">
+  <div class="tabs">
+    <button class="tab-btn active" id="tabResBtn" onclick="switchTab('res')">Respuesta</button>
+    <button class="tab-btn" id="tabThinkBtn" onclick="switchTab('think')">Razonamiento (<think>)</button>
+  </div>
+  <div class="tab-content" id="outputArea">Esperando prompt...</div>
+</div>
+
+<script>
+let abortCtrl = null;
+let speedHistory = [];
+let maxHistory = 100;
+let peakToks = 0;
+let outputText = '';
+let thinkText = '';
+let currentTab = 'res';
+
+const presets = {
+  code: `Implementa una clase completa en Python llamada SpatialQuadTree con metodos de insercion, busqueda por radio de colision, subdivision recursiva de nodos y serializacion JSON con tipos de datos explicita y docstrings detallados.`,
+  reasoning: `Explica en detalle los principios termodinamicos del ciclo de Carnot, por que ninguna maquina termica real puede superar su eficiencia teorica y calcula la entropia diferencial paso a paso.`,
+  game: `Crea un juego completo en un unico archivo HTML con Canvas 2D: un clon de Asteroids espacial con fisicas de inercia vectorial, disparo de proyectiles, particulas de explosion y marcador de puntuacion.`
+};
+
+function loadPreset(key) {
+  document.getElementById('promptInput').value = presets[key];
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.getElementById('tabResBtn').classList.toggle('active', tab === 'res');
+  document.getElementById('tabThinkBtn').classList.toggle('active', tab === 'think');
+  renderOutput();
+}
+
+function renderOutput() {
+  const el = document.getElementById('outputArea');
+  if (currentTab === 'res') {
+    el.innerText = outputText || '(Sin respuesta aun)';
+  } else {
+    el.innerText = thinkText || '(Sin razonamiento interno registrado)';
+  }
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearAll() {
+  outputText = '';
+  thinkText = '';
+  speedHistory = [];
+  peakToks = 0;
+  document.getElementById('metricInstantToks').innerHTML = '0.0 <span style="font-size: 14px;">tok/s</span>';
+  document.getElementById('metricAvgToks').innerHTML = '0.0 <span style="font-size: 14px;">tok/s</span>';
+  document.getElementById('metricTokens').innerText = '0';
+  document.getElementById('metricElapsed').innerText = 'Tiempo: 0.0 s';
+  document.getElementById('metricPeak').innerText = 'Pico maximo: 0.0 tok/s';
+  document.getElementById('metricPP').innerHTML = '-- <span style="font-size: 14px;">tok/s</span>';
+  document.getElementById('metricTTFT').innerText = 'TTFT: -- ms';
+  document.getElementById('metricLatency').innerText = 'Latencia: -- ms/tok';
+  renderOutput();
+  drawChart();
+}
+
+// Chart rendering
+const canvas = document.getElementById('speedChart');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  canvas.width = canvas.parentElement.clientWidth;
+  canvas.height = canvas.parentElement.clientHeight;
+  drawChart();
+}
+window.addEventListener('resize', resizeCanvas);
+setTimeout(resizeCanvas, 100);
+
+function drawChart() {
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  // Background grid
+  ctx.strokeStyle = '#21262d';
+  ctx.lineWidth = 1;
+  const targetMax = Math.max(60, Math.ceil((peakToks + 10) / 10) * 10);
+  
+  for (let s = 10; s <= targetMax; s += 10) {
+    const y = h - (s / targetMax) * (h - 30) - 15;
+    ctx.beginPath();
+    ctx.moveTo(40, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '10px Segoe UI';
+    ctx.fillText(s + ' t/s', 5, y + 3);
+  }
+
+  // 50 t/s target reference line
+  const y50 = h - (50 / targetMax) * (h - 30) - 15;
+  ctx.strokeStyle = 'rgba(63, 185, 80, 0.35)';
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(40, y50);
+  ctx.lineTo(w, y50);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(63, 185, 80, 0.7)';
+  ctx.fillText('Objetivo Ultra 50 t/s', w - 120, y50 - 5);
+
+  if (speedHistory.length < 2) return;
+
+  // Draw plot line
+  ctx.strokeStyle = '#3fb950';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  const step = (w - 50) / (maxHistory - 1);
+
+  speedHistory.forEach((pt, i) => {
+    const x = 45 + i * step;
+    const y = h - (pt.val / targetMax) * (h - 30) - 15;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Area under curve
+  ctx.lineTo(45 + (speedHistory.length - 1) * step, h - 15);
+  ctx.lineTo(45, h - 15);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(63, 185, 80, 0.1)';
+  ctx.fill();
+}
+
+async function startGeneration() {
+  const prompt = document.getElementById('promptInput').value.trim();
+  if (!prompt) return;
+
+  clearAll();
+  abortCtrl = new AbortController();
+  document.getElementById('btnGenerate').disabled = true;
+  document.getElementById('btnStop').disabled = false;
+  document.getElementById('statusBadge').className = 'badge badge-busy';
+  document.getElementById('statusBadge').innerText = 'Generando...';
+
+  const tStart = performance.now();
+  let firstTokenTime = null;
+  let tokenCount = 0;
+  let lastTimestamp = null;
+  let windowTokens = [];
+  let inThink = false;
+
+  try {
+    const res = await fetch('http://127.0.0.1:8080/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: prompt }],
+        stream: true,
+        temperature: 0.6,
+        top_p: 0.95
+      }),
+      signal: abortCtrl.signal
+    });
+
+    if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      const now = performance.now();
+
+      for (const line of lines) {
+        const clean = line.trim();
+        if (!clean || clean.startsWith(':')) continue;
+        if (clean === 'data: [DONE]') break;
+        if (!clean.startsWith('data: ')) continue;
+
+        try {
+          const payload = JSON.parse(clean.substring(6));
+          const delta = payload.choices[0]?.delta || {};
+          const content = delta.content || '';
+          const reasoning = delta.reasoning_content || '';
+
+          if (content || reasoning) {
+            tokenCount++;
+            if (!firstTokenTime) {
+              firstTokenTime = now;
+              const ttft = Math.round(firstTokenTime - tStart);
+              document.getElementById('metricTTFT').innerText = `TTFT: ${ttft} ms`;
+            }
+
+            // Route content
+            if (reasoning) {
+              thinkText += reasoning;
+            } else if (content.includes('<think>')) {
+              inThink = true;
+              thinkText += content.replace('<think>', '');
+            } else if (content.includes('</think>')) {
+              inThink = false;
+              outputText += content.replace('</think>', '');
+            } else if (inThink) {
+              thinkText += content;
+            } else {
+              outputText += content;
+            }
+
+            // Timing calculation
+            windowTokens.push(now);
+            // Keep window of last 1.5 seconds
+            while (windowTokens.length > 0 && (now - windowTokens[0]) > 1500) {
+              windowTokens.shift();
+            }
+
+            const dtWindow = (now - windowTokens[0]) / 1000;
+            const instantToks = (windowTokens.length > 1 && dtWindow > 0.05) 
+              ? (windowTokens.length / dtWindow) 
+              : 0;
+
+            const totalDt = (now - firstTokenTime) / 1000;
+            const avgToks = totalDt > 0 ? (tokenCount / totalDt) : 0;
+
+            if (instantToks > peakToks) peakToks = instantToks;
+
+            // Update UI elements
+            document.getElementById('metricInstantToks').innerHTML = 
+              `${instantToks.toFixed(1)} <span style="font-size: 14px;">tok/s</span>`;
+            document.getElementById('metricAvgToks').innerHTML = 
+              `${avgToks.toFixed(1)} <span style="font-size: 14px;">tok/s</span>`;
+            document.getElementById('metricTokens').innerText = tokenCount;
+            document.getElementById('metricElapsed').innerText = `Tiempo: ${totalDt.toFixed(1)} s`;
+            document.getElementById('metricPeak').innerText = `Pico maximo: ${peakToks.toFixed(1)} tok/s`;
+            if (instantToks > 0) {
+              document.getElementById('metricLatency').innerText = `Latencia: ${(1000 / instantToks).toFixed(1)} ms/tok`;
+            }
+
+            // Append to chart history (every ~100ms)
+            if (!lastTimestamp || (now - lastTimestamp) > 100) {
+              speedHistory.push({ val: instantToks, time: now });
+              if (speedHistory.length > maxHistory) speedHistory.shift();
+              drawChart();
+              lastTimestamp = now;
+            }
+          }
+        } catch (e) {}
+      }
+      renderOutput();
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      outputText += `\n[Error de conexion: ${err.message}]`;
+      renderOutput();
+    }
+  } finally {
+    document.getElementById('btnGenerate').disabled = false;
+    document.getElementById('btnStop').disabled = true;
+    document.getElementById('statusBadge').className = 'badge badge-online';
+    document.getElementById('statusBadge').innerText = 'Servidor Conectado';
+    drawChart();
+  }
+}
+
+function stopGeneration() {
+  if (abortCtrl) abortCtrl.abort();
+}
+
+// Initial prompt
+loadPreset('code');
+</script>
+</body>
+</html>

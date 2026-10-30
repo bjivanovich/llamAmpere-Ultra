@@ -1694,7 +1694,8 @@ static const char * ggml_backend_cuda_host_buffer_type_name(ggml_backend_buffer_
 // the gather opt-in above because the cost model is different: a gather touches a few rows, while
 // an expert read moves megabytes, and is only affordable when most routed experts are cached.
 static bool ggml_cuda_moe_host_experts_enabled() {
-    static const bool enabled = getenv("GGML_MOE_HOST_EXPERTS") != nullptr;
+    static const bool enabled = (getenv("GGML_MOE_HOST_EXPERTS") != nullptr) ||
+                                (getenv("LLAMA_ARG_MOE_PROFILE") != nullptr);
     return enabled;
 }
 
@@ -8481,7 +8482,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             // addresses experts through a table and so can be pointed at either place, and only
             // when explicitly opted in.
             if (op->op == GGML_OP_MUL_MAT_ID && i == 0 &&
-                (src->type == GGML_TYPE_TQ3_1S || src->type == GGML_TYPE_TQ4_1S) &&
+                (src->type == GGML_TYPE_TQ3_1S || src->type == GGML_TYPE_TQ4_1S ||
+                 src->type == GGML_TYPE_TQ2_T  || src->type == GGML_TYPE_TQK6   ||
+                 src->type == GGML_TYPE_TQK7   || src->type == GGML_TYPE_TQP5   ||
+                 src->type == GGML_TYPE_TQP6   || src->type == GGML_TYPE_TQP7) &&
                 ggml_cuda_moe_host_experts_enabled()) {
                 continue;
             }

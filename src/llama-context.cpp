@@ -254,7 +254,7 @@ llama_context::llama_context(const llama_model & model, llama_context_params par
     cparams.cb_eval           = params.cb_eval;
     cparams.cb_eval_user_data = params.cb_eval_user_data;
 
-    cparams.ctx_other = nullptr;
+    cparams.ctx_other = params.ctx_other;
 
     // TODO: more generic
     if (model.arch == LLM_ARCH_GEMMA4_ASSISTANT) {
@@ -1313,6 +1313,16 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
         resolve(llm_fused_op_gdn_ar_probe, cparams.fused_gdn_ar);
         resolve(llm_fused_op_gdn_ch_probe, cparams.fused_gdn_ch);
         cparams.auto_fgdn = false;
+    }
+
+
+    if (cparams.ctx_other != nullptr || cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP || model.hparams.n_layer_nextn > 0 || model.hparams.n_layer() <= 2) {
+        cparams.auto_flid = false;
+        cparams.fused_lid = false;
+        cparams.auto_fhc  = false;
+        cparams.fused_dsv4_hc_pre  = false;
+        cparams.fused_dsv4_hc_comb = false;
+        cparams.fused_dsv4_hc_post = false;
     }
 
     if (cparams.auto_flid) {
@@ -2784,6 +2794,10 @@ void llama_context::set_adapters_lora(llama_adapter_lora ** adapters, size_t n_a
 
 bool llama_context::adapters_lora_are_same(llama_adapter_lora ** adapters, size_t n_adapters, float * scales) {
     LLAMA_LOG_DEBUG("%s: adapters = %p\n", __func__, (void *) adapters);
+
+    if (!loras) {
+        return n_adapters == 0;
+    }
 
     // Adapters with a zero scale are never added to `loras`, so also ignore them for the comparison.
     size_t n_non_zero = 0;

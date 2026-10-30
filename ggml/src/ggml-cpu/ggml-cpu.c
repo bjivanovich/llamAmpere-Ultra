@@ -1393,8 +1393,22 @@ static void ggml_compute_forward_mul_mat_one_chunk(
                 //    vec_dot(ne00, &dst_col[ir0], src0_row + ir0*nb01, src1_col);
                 //}
 
-                for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
-                    vec_dot(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0), src0_row + ir0 * nb01, (num_rows_per_vec_dot > 1 ? nb01 : 0), src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                if (vec_dot) {
+                    for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
+                        vec_dot(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0), src0_row + ir0 * nb01, (num_rows_per_vec_dot > 1 ? nb01 : 0), src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                    }
+                } else {
+                    const struct ggml_type_traits * tt = ggml_get_type_traits(type);
+                    if (tt->to_float) {
+                        float * row_f32 = (float *) malloc(ne00 * sizeof(float));
+                        for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ++ir0) {
+                            tt->to_float(src0_row + ir0 * nb01, row_f32, ne00);
+                            ggml_vec_dot_f32(ne00, &tmp[ir0 - iir0], 0, row_f32, 0, (const float *) src1_col, 0, 1);
+                        }
+                        free(row_f32);
+                    } else {
+                        memset(tmp, 0, sizeof(tmp));
+                    }
                 }
 
                 for (int cn = 0; cn < num_rows_per_vec_dot; ++cn) {
@@ -1805,8 +1819,22 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
 
                 float * dst_col = (float *) ((char *) dst->data + (i1*nb1 + i2*nb2));
 
-                for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ++ir0) {
-                    vec_dot(ne00, &tmp[ir0 - iir0], 0, src0_cur + ir0*nb01, 0, src1_col, 0, 1);
+                if (vec_dot) {
+                    for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ++ir0) {
+                        vec_dot(ne00, &tmp[ir0 - iir0], 0, src0_cur + ir0*nb01, 0, src1_col, 0, 1);
+                    }
+                } else {
+                    const struct ggml_type_traits * tt = ggml_get_type_traits(type);
+                    if (tt->to_float && (src1->type == GGML_TYPE_F32 || src1_cont)) {
+                        float * row_f32 = (float *) malloc(ne00 * sizeof(float));
+                        for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ++ir0) {
+                            tt->to_float(src0_cur + ir0*nb01, row_f32, ne00);
+                            ggml_vec_dot_f32(ne00, &tmp[ir0 - iir0], 0, row_f32, 0, (const float *) src1_col, 0, 1);
+                        }
+                        free(row_f32);
+                    } else {
+                        memset(tmp, 0, sizeof(tmp));
+                    }
                 }
 
                 memcpy(&dst_col[iir0], tmp, (MIN(iir0 + blck_0, ir0_end) - iir0)*sizeof(float));
