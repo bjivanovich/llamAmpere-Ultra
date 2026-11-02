@@ -1,3 +1,30 @@
+# llamAmpere-Ultra: High-Throughput Ampere SM86 Inference & Sub-2.3s VMM Model Swapping
+
+> **llamAmpere-Ultra**: An integrated high-performance `llama.cpp` fork tuned for the NVIDIA GeForce RTX 3090 / 3090 Ti (Ampere, SM86).
+> Combines JakeATX's Ampere tensor-core kernels (Q8/Q4 MMA, FlashAttention I8QK, SJ-KVaRN / turbo4-5 KV cache) with **low-level CUDA Driver VMM Fast Model Swapping (<2.3s)**, native **Gyro-Coder TQ2_0 MoE engine**, an **OpenAI-compatible fast-swap router**, and an **MCP server** for multi-agent pipelines.
+
+---
+
+### Key Capabilities in llamAmpere-Ultra:
+
+1. **Low-Level CUDA Driver VMM Hot Swapping (<2.3s)**:
+   - Eviction (`Sleep` via `cuMemUnmap`): **<60 ms** to release 18-20 GB of physical VRAM.
+   - Restoration (`Wake` via `cuMemMap` + PCIe DMA): **1.71s - 2.29s** at 8.44 - 8.50 GB/s.
+   - Solves the Windows WDDM 24 GB pinned host memory cap via the **Sliding Window Invariant**.
+   - Zero CUDA context teardown, zero graph recompilation.
+2. **Gyro-Coder TQ2_0 + A8 PLE N-Gram Support (AgentionAI)**:
+   - MoE 70B (3.8B active) running in 19.9 GB VRAM while querying a 54-58 GB PLE N-gram table on NVMe via `mmap` at 53.55 tok/s.
+3. **Multi-Agent Infrastructure (Zero-Config)**:
+   - `router/vmm_router.py`: OpenAI-compatible reverse proxy (`http://127.0.0.1:8000/v1`) ready for `pi-coding-agent`, Aider, Cursor, Continue.dev, OpenHands.
+   - `pipeline/autonomous_pipeline.py`: Autonomous 3-agent pipeline runner (Architect -> Coder -> Sandbox -> Debugger).
+   - `mcp/vmm_mcp_server.py`: Native Model Context Protocol server for IDEs.
+
+> **Standalone VMM Swap Patch Note:**
+> If you only need the VMM hot-swapping technology to integrate into upstream `llama.cpp` or another custom engine without cloning `llamAmpere-Ultra`, you can use the standalone patch in [`patches/vmm-swap/`](patches/vmm-swap/) or the dedicated repository:
+> **[bjivanovich2017/llamampere-vmm-swap](https://github.com/bjivanovich2017/llamampere-vmm-swap)**.
+
+---
+
 > **llamAmpere v0.5.4**: a llama.cpp fork tuned for the RTX 3090 / 3090 Ti (Ampere, SM86), running Qwen3.8-27B with its MTP draft head.
 
 ## What's new in v0.5
