@@ -1,0 +1,26 @@
+{
+  "architect": {
+    "model": "Gyro-Coder TQ2_0",
+    "gen_time_s": 117.136545419693,
+    "speed_tok_s": 12.805568020002578,
+    "plan_chars": 7004
+  },
+  "coder": {
+    "model": "Cyber-ATX iQ4_XS 27B",
+    "vmm_wake_dma_s": "< 1.72s (Verificado en VMM)",
+    "gen_time_s": 57.7159321308136,
+    "speed_tok_s": 35.484136258220566,
+    "code_lines": 246
+  },
+  "execution_test": {
+    "exit_code": 1,
+    "execution_time_s": 0.1448991298675537,
+    "passed": false
+  },
+  "debugger": {
+    "model": "Cyber-ATX / Swift Auditor",
+    "gen_time_s": 35.68732237815857,
+    "speed_tok_s": 57.38732590521897,
+    "final_verification": false
+  }
+}

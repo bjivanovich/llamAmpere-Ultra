@@ -1,0 +1,20 @@
+{
+  "architect": {
+    "model": "Gyro-Coder TQ2_0 (MoE 70.6GB / 3.8B Active)",
+    "load_s": 45.19297742843628,
+    "gen_s": 20.5648512840271,
+    "tok_s": 49.79369827951782
+  },
+  "coder": {
+    "model": "Cyber-ATX iQ4_XS (27B Coder)",
+    "ram_to_vram_wake_s": "<2.3s (VMM DMA)",
+    "gen_s": 23.019699573516846,
+    "tok_s": 44.48363875165717
+  },
+  "debugger": {
+    "model": "ATX-Swift-1.5 Q5_K_M (27B Auditor & Debugger)",
+    "load_s": 37.14052414894104,
+    "gen_s": 26.71669626235962,
+    "tok_s": 38.32809228896628
+  }
+}
