@@ -616,6 +616,10 @@ extern "C" {
 
     LLAMA_API void llama_model_free(struct llama_model * model);
 
+    // VMM fast model swapping (<2s RAM <-> VRAM)
+    LLAMA_API bool llama_model_sleep(struct llama_model * model);
+    LLAMA_API bool llama_model_wake(struct llama_model * model);
+
     LLAMA_API struct llama_context * llama_init_from_model(
                      struct llama_model * model,
             struct llama_context_params   params);

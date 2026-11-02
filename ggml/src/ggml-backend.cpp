@@ -1047,6 +1047,21 @@ void ggml_backend_multi_buffer_set_usage(ggml_backend_buffer_t buffer, enum ggml
     }
 }
 
+size_t ggml_backend_multi_buffer_get_n_buffers(ggml_backend_buffer_t buffer) {
+    GGML_ASSERT(buffer);
+    GGML_ASSERT(ggml_backend_buffer_is_multi_buffer(buffer));
+    ggml_backend_multi_buffer_context * ctx = (ggml_backend_multi_buffer_context *) buffer->context;
+    return ctx->n_buffers;
+}
+
+ggml_backend_buffer_t ggml_backend_multi_buffer_get_buffer(ggml_backend_buffer_t buffer, size_t index) {
+    GGML_ASSERT(buffer);
+    GGML_ASSERT(ggml_backend_buffer_is_multi_buffer(buffer));
+    ggml_backend_multi_buffer_context * ctx = (ggml_backend_multi_buffer_context *) buffer->context;
+    GGML_ASSERT(index < ctx->n_buffers);
+    return ctx->buffers[index];
+}
+
 // creates a copy of the tensor with the same memory layout
 static struct ggml_tensor * ggml_dup_tensor_layout(struct ggml_context * ctx, const struct ggml_tensor * tensor) {
     struct ggml_tensor * dup = ggml_dup_tensor(ctx, tensor);

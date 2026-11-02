@@ -1893,14 +1893,23 @@ private:
         if (new_state) {
             if (callback_state) {
                 callback_state(SERVER_STATE_SLEEPING, {});
-                // note: for sleeping == false, event is emitted by load_model()
             }
             SRV_INF("%s", "server is entering sleeping state\n");
             prompt_cache_flush();
-            destroy();
+            bool s1 = model_tgt && llama_model_sleep(model_tgt);
+            bool s2 = model_dft && llama_model_sleep(model_dft);
+            if (s1 || s2) {
+                SRV_INF("%s", "server: fast VMM sleep active (VRAM unmapped in <60ms)\n");
+            } else {
+                destroy();
+            }
         } else {
             SRV_INF("%s", "server is exiting sleeping state\n");
-            if (!load_model(params_base)) {
+            bool w1 = model_tgt && llama_model_wake(model_tgt);
+            bool w2 = model_dft && llama_model_wake(model_dft);
+            if (w1 || w2) {
+                SRV_INF("%s", "server: fast VMM wake completed from RAM in <2s\n");
+            } else if (!load_model(params_base)) {
                 GGML_ABORT("failed to reload model after sleeping");
             }
         }

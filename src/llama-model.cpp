@@ -1,3 +1,6 @@
+#ifdef GGML_USE_CUDA
+#include "ggml-cuda.h"
+#endif
 #include "llama-model.h"
 
 #include "llama-arch.h"
@@ -3537,6 +3540,52 @@ void llama_free_model(llama_model * model) {
 
 void llama_model_free(llama_model * model) {
     delete model;
+}
+
+bool llama_model::sleep() {
+#ifdef GGML_USE_CUDA
+    if (!pimpl) {
+        return false;
+    }
+    bool any = false;
+    for (auto & [ctx, bufs] : pimpl->ctxs_bufs) {
+        for (auto & buf : bufs) {
+            if (ggml_backend_cuda_buffer_sleep(buf.get())) {
+                any = true;
+            }
+        }
+    }
+    return any;
+#else
+    return false;
+#endif
+}
+
+bool llama_model::wake() {
+#ifdef GGML_USE_CUDA
+    if (!pimpl) {
+        return false;
+    }
+    bool any = false;
+    for (auto & [ctx, bufs] : pimpl->ctxs_bufs) {
+        for (auto & buf : bufs) {
+            if (ggml_backend_cuda_buffer_wake(buf.get())) {
+                any = true;
+            }
+        }
+    }
+    return any;
+#else
+    return false;
+#endif
+}
+
+bool llama_model_sleep(llama_model * model) {
+    return model ? model->sleep() : false;
+}
+
+bool llama_model_wake(llama_model * model) {
+    return model ? model->wake() : false;
 }
 
 int32_t llama_model_n_ctx_train(const llama_model * model) {

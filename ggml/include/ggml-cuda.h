@@ -48,6 +48,10 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_phase_arena_buffer
 // conduct allreduce operation between devices
 GGML_BACKEND_API bool ggml_backend_cuda_allreduce_tensor(ggml_backend_t * backends, struct ggml_tensor ** tensors, size_t n_backends);
 
+// VMM sleepable buffer operations for fast model swapping (<2s RAM <-> VRAM)
+GGML_BACKEND_API bool ggml_backend_cuda_buffer_sleep(ggml_backend_buffer_t buffer);
+GGML_BACKEND_API bool ggml_backend_cuda_buffer_wake(ggml_backend_buffer_t buffer);
+
 // pinned host buffer for use with the CPU backend for faster copies between CPU and GPU
 GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_host_buffer_type(void);
 

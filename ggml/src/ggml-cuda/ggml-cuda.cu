@@ -1,3 +1,12 @@
+#ifndef GGML_USE_VMM
+#define GGML_USE_VMM 1
+#endif
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
 #include "ggml-cuda.h"
 #include "ggml-cuda-kv-stream-testing.h"
 #include "moe-devsort.cuh"
@@ -835,6 +844,15 @@ static const char * ggml_backend_cuda_phase_arena_buffer_type_get_name(
     ggml_backend_buffer_type_t buft);
 
 struct ggml_backend_cuda_buffer_context {
+    size_t size = 0;
+    size_t aligned_size = 0;
+    void * host_mirror = nullptr;
+    bool mirror_captured = false;
+    bool is_vmm = false;
+    bool is_asleep = false;
+
+    bool sleep();
+    bool wake();
     int device;
     void * dev_ptr = nullptr;
     ggml_backend_cuda_phase_arena_t arena = nullptr;
@@ -1102,16 +1120,77 @@ static ggml_backend_buffer_t ggml_backend_cuda_buffer_type_alloc_buffer(ggml_bac
 
     ggml_cuda_set_device(buft_ctx->device);
 
-    void * dev_ptr;
-    cudaError_t err = ggml_cuda_device_malloc(&dev_ptr, size, buft_ctx->device);
-    if (err != cudaSuccess) {
-        // clear the error
-        (void)cudaGetLastError();
-        GGML_LOG_ERROR("%s: allocating %.2f MiB on device %d: cudaMalloc failed: %s\n", __func__, size / 1024.0 / 1024.0, buft_ctx->device, cudaGetErrorString(err));
-        return nullptr;
+    void * dev_ptr = nullptr;
+    void * host_mirror_pre = nullptr;
+    bool is_vmm = false;
+    size_t aligned_size = 0;
+
+    static const bool enable_sleep = [] {
+        const char * e = getenv("LLAMAMPERE_ENABLE_SLEEP");
+        return e != nullptr && (e[0] == '1' || e[0] == 't' || e[0] == 'T');
+    }();
+
+    int physical_id = ggml_cuda_get_physical_device(buft_ctx->device);
+    int device_vmm = 0;
+    CUdevice cu_dev;
+    if (enable_sleep && size > 32 * 1024 * 1024 &&
+        cuDeviceGet(&cu_dev, physical_id) == CUDA_SUCCESS &&
+        cuDeviceGetAttribute(&device_vmm, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, cu_dev) == CUDA_SUCCESS &&
+        device_vmm) {
+        CUmemAllocationProp prop = {};
+        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        prop.location.id = physical_id;
+        size_t granularity = 2 * 1024 * 1024;
+        cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED);
+        if (granularity == 0) granularity = 2 * 1024 * 1024;
+        aligned_size = ((size + granularity - 1) / granularity) * granularity;
+        CUdeviceptr vaddr = 0;
+        CUresult r_res = cuMemAddressReserve(&vaddr, aligned_size, 0, 0, 0);
+        if (r_res == CUDA_SUCCESS) {
+            cudaError_t h_err = cudaHostAlloc(&host_mirror_pre, aligned_size, cudaHostAllocDefault);
+            if (h_err == cudaSuccess) {
+                GGML_LOG_INFO("%s: pre-allocated %.2f MiB pinned host mirror at %p\n",
+                              __func__, aligned_size / 1024.0 / 1024.0, host_mirror_pre);
+            } else {
+                GGML_LOG_WARN("%s: failed to pre-allocate pinned host mirror (err=%d)\n", __func__, (int)h_err);
+            }
+            CUmemGenericAllocationHandle handle;
+            CUresult c_res = cuMemCreate(&handle, aligned_size, &prop, 0);
+            if (c_res == CUDA_SUCCESS) {
+                CU_CHECK(cuMemMap(vaddr, aligned_size, 0, handle, 0));
+                CU_CHECK(cuMemRelease(handle));
+                CUmemAccessDesc access = {};
+                access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+                access.location.id = physical_id;
+                access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+                CU_CHECK(cuMemSetAccess(vaddr, aligned_size, &access, 1));
+                dev_ptr = (void *)vaddr;
+                is_vmm = true;
+                GGML_LOG_INFO("%s: allocated %.2f MiB VMM sleepable buffer at %p (aligned %.2f MiB)\n",
+                              __func__, size / 1024.0 / 1024.0, dev_ptr, aligned_size / 1024.0 / 1024.0);
+            } else {
+                if (host_mirror_pre) cudaFreeHost(host_mirror_pre);
+                host_mirror_pre = nullptr;
+                cuMemAddressFree(vaddr, aligned_size);
+            }
+        }
+    }
+
+    if (!is_vmm) {
+        cudaError_t err = ggml_cuda_device_malloc(&dev_ptr, size, buft_ctx->device);
+        if (err != cudaSuccess) {
+            (void)cudaGetLastError();
+            GGML_LOG_ERROR("%s: allocating %.2f MiB on device %d: cudaMalloc failed: %s\n", __func__, size / 1024.0 / 1024.0, buft_ctx->device, cudaGetErrorString(err));
+            return nullptr;
+        }
     }
 
     ggml_backend_cuda_buffer_context * ctx = new ggml_backend_cuda_buffer_context(buft_ctx->device, dev_ptr);
+    ctx->size = size;
+    ctx->aligned_size = aligned_size;
+    ctx->is_vmm = is_vmm;
+    ctx->host_mirror = host_mirror_pre;
 
     return ggml_backend_buffer_init(buft, ggml_backend_cuda_buffer_interface, ctx, size);
 }
@@ -1264,7 +1343,115 @@ static void ggml_backend_cuda_phase_arena_release(ggml_backend_cuda_phase_arena_
     delete arena;
 }
 
+bool ggml_backend_cuda_buffer_context::sleep() {
+    if (!is_vmm || is_asleep || dev_ptr == nullptr) return false;
+    if (host_mirror == nullptr) {
+        cudaError_t err = cudaHostAlloc(&host_mirror, aligned_size, cudaHostAllocDefault);
+        if (err != cudaSuccess) {
+            GGML_LOG_ERROR("VMM sleep: failed to allocate %zu bytes pinned memory (err=%d)\n", aligned_size, (int)err);
+            return false;
+        }
+    }
+    if (!mirror_captured) {
+        int64_t t_cap0 = ggml_time_us();
+        CUDA_CHECK(cudaMemcpy(host_mirror, dev_ptr, size, cudaMemcpyDeviceToHost));
+        int64_t t_cap1 = ggml_time_us();
+        mirror_captured = true;
+        GGML_LOG_INFO("VMM sleep: captured %.2f MiB to pinned host mirror in %.2f ms\n",
+                      size / 1024.0 / 1024.0, (t_cap1 - t_cap0) / 1000.0);
+    }
+    int64_t t0 = ggml_time_us();
+    CUresult res = cuMemUnmap((CUdeviceptr)dev_ptr, aligned_size);
+    int64_t t1 = ggml_time_us();
+    if (res != CUDA_SUCCESS) {
+        GGML_LOG_ERROR("VMM sleep: cuMemUnmap failed on %p (code=%d)\n", dev_ptr, (int)res);
+        return false;
+    }
+    is_asleep = true;
+    GGML_LOG_INFO("VMM sleep: unmapped %.2f MiB from VRAM in %.2f ms\n", aligned_size / 1024.0 / 1024.0, (t1 - t0) / 1000.0);
+    return true;
+}
+
+bool ggml_backend_cuda_buffer_context::wake() {
+    if (!is_vmm || !is_asleep || dev_ptr == nullptr || host_mirror == nullptr) return false;
+    int64_t t0 = ggml_time_us();
+    CUmemAllocationProp prop = {};
+    prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    prop.location.id = ggml_cuda_get_physical_device(device);
+    CUmemGenericAllocationHandle handle;
+    CUresult c_res = cuMemCreate(&handle, aligned_size, &prop, 0);
+    if (c_res != CUDA_SUCCESS) {
+        GGML_LOG_ERROR("VMM wake: cuMemCreate failed (code=%d)\n", (int)c_res);
+        return false;
+    }
+    CU_CHECK(cuMemMap((CUdeviceptr)dev_ptr, aligned_size, 0, handle, 0));
+    CU_CHECK(cuMemRelease(handle));
+    CUmemAccessDesc access = {};
+    access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    access.location.id = prop.location.id;
+    access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    CU_CHECK(cuMemSetAccess((CUdeviceptr)dev_ptr, aligned_size, &access, 1));
+    int64_t t_map = ggml_time_us();
+    CUDA_CHECK(cudaMemcpyAsync(dev_ptr, host_mirror, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
+    CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
+    int64_t t1 = ggml_time_us();
+    is_asleep = false;
+    double dma_sec = (t1 - t_map) / 1000000.0;
+    double gb_sec = (size / (1024.0 * 1024.0 * 1024.0)) / (dma_sec > 0.0001 ? dma_sec : 0.0001);
+    GGML_LOG_INFO("VMM wake: restored %.2f MiB in %.2f ms (map: %.2f ms, DMA: %.2f ms, %.2f GB/s)\n",
+                  size / 1024.0 / 1024.0, (t1 - t0) / 1000.0, (t_map - t0) / 1000.0, (t1 - t_map) / 1000.0, gb_sec);
+    return true;
+}
+
+bool ggml_backend_cuda_buffer_sleep(ggml_backend_buffer_t buffer) {
+    if (!buffer) return false;
+    if (ggml_backend_buffer_is_multi_buffer(buffer)) {
+        bool any = false;
+        size_t n = ggml_backend_multi_buffer_get_n_buffers(buffer);
+        for (size_t i = 0; i < n; i++) {
+            if (ggml_backend_cuda_buffer_sleep(ggml_backend_multi_buffer_get_buffer(buffer, i))) {
+                any = true;
+            }
+        }
+        return any;
+    }
+    if (!ggml_backend_buffer_is_cuda(buffer)) return false;
+    ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
+    return ctx ? ctx->sleep() : false;
+}
+
+bool ggml_backend_cuda_buffer_wake(ggml_backend_buffer_t buffer) {
+    if (!buffer) return false;
+    if (ggml_backend_buffer_is_multi_buffer(buffer)) {
+        bool any = false;
+        size_t n = ggml_backend_multi_buffer_get_n_buffers(buffer);
+        for (size_t i = 0; i < n; i++) {
+            if (ggml_backend_cuda_buffer_wake(ggml_backend_multi_buffer_get_buffer(buffer, i))) {
+                any = true;
+            }
+        }
+        return any;
+    }
+    if (!ggml_backend_buffer_is_cuda(buffer)) return false;
+    ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
+    return ctx ? ctx->wake() : false;
+}
+
 ggml_backend_cuda_buffer_context::~ggml_backend_cuda_buffer_context() {
+    if (is_vmm) {
+        if (!is_asleep && dev_ptr != nullptr) {
+            CU_CHECK(cuMemUnmap((CUdeviceptr)dev_ptr, aligned_size));
+        }
+        if (dev_ptr != nullptr) {
+            CU_CHECK(cuMemAddressFree((CUdeviceptr)dev_ptr, aligned_size));
+        }
+        if (host_mirror != nullptr) {
+            CUDA_CHECK(cudaFreeHost(host_mirror));
+            host_mirror = nullptr;
+        }
+        return;
+    }
     if (arena == nullptr) {
         CUDA_CHECK(cudaFree(dev_ptr));
         return;
@@ -8643,6 +8830,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_BF16:
                     case GGML_TYPE_TQ4_1S:
                     case GGML_TYPE_TQ3_1S:
+                    case GGML_TYPE_TQ2_T:
+                    case GGML_TYPE_TQK6:
+                    case GGML_TYPE_TQK7:
+                    case GGML_TYPE_TQP5:
+                    case GGML_TYPE_TQP6:
+                    case GGML_TYPE_TQP7:
                         return true;
                     default:
                         return false;
@@ -8681,6 +8874,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_IQ4_XS:
                     case GGML_TYPE_TQ4_1S:
                     case GGML_TYPE_TQ3_1S:
+                    case GGML_TYPE_TQ2_T:
+                    case GGML_TYPE_TQK6:
+                    case GGML_TYPE_TQK7:
+                    case GGML_TYPE_TQP5:
+                    case GGML_TYPE_TQP6:
+                    case GGML_TYPE_TQP7:
                         return true;
                     case GGML_TYPE_IQ4_NL:
                     case GGML_TYPE_MXFP4:
