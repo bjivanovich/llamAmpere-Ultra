@@ -1,27 +1,31 @@
-# llamAmpere-Ultra: High-Throughput Ampere SM86 Inference & Sub-2.3s VMM Model Swapping
+# llamAmpere-Ultra: Autonomous Multi-Agent Runtime & Sub-2.3s CUDA VMM Model Swapping
 
-> **llamAmpere-Ultra**: An integrated high-performance `llama.cpp` fork tuned for the NVIDIA GeForce RTX 3090 / 3090 Ti (Ampere, SM86).
-> Combines JakeATX's Ampere tensor-core kernels (Q8/Q4 MMA, FlashAttention I8QK, SJ-KVaRN / turbo4-5 KV cache) with **low-level CUDA Driver VMM Fast Model Swapping (<2.3s)**, native **Gyro-Coder TQ2_0 MoE engine**, an **OpenAI-compatible fast-swap router**, and an **MCP server** for multi-agent pipelines.
+> **llamAmpere-Ultra**: An integrated high-performance `llama.cpp` runtime tuned for the NVIDIA GeForce RTX 3090 / 3090 Ti (Ampere, SM86).
+>
+> **Flagship Breakthrough — `cuda-vmm-swap`**: Built-in native **CUDA Driver Virtual Memory Management (VMM)** that hot-swaps 14 to 20 GB models between host RAM and GPU VRAM in **under 2.3 seconds** (`<60 ms` unmap eviction). Enables running sequential multi-agent pipelines (Architect -> Coder -> Debugger) on a single 24 GB GPU without restarting `llama-server` or recompiling CUDA graphs.
+>
+> Combines JakeATX's Ampere tensor-core kernels (Q8/Q4 MMA, FlashAttention I8QK, SJ-KVaRN / turbo4-5 KV cache up to 200k context), native **Gyro-Coder TQ2_0 MoE engine (AgentionAI)**, an **OpenAI-compatible fast-swap router**, and an **MCP server** for AI coding assistants.
 
 ---
 
-### Key Capabilities in llamAmpere-Ultra:
+### Core Innovations in llamAmpere-Ultra:
 
-1. **Low-Level CUDA Driver VMM Hot Swapping (<2.3s)**:
-   - Eviction (`Sleep` via `cuMemUnmap`): **<60 ms** to release 18-20 GB of physical VRAM.
-   - Restoration (`Wake` via `cuMemMap` + PCIe DMA): **1.71s - 2.29s** at 8.44 - 8.50 GB/s.
-   - Solves the Windows WDDM 24 GB pinned host memory cap via the **Sliding Window Invariant**.
+1. **Native CUDA Driver VMM Fast Model Swapping (<2.3s)**:
+   - Eviction (`Sleep` via `cuMemUnmap`): **<60 ms** to release 18-22 GB of physical VRAM back to baseline (540 MB).
+   - Restoration (`Wake` via `cuMemMap` + PCIe DMA): **1.71s - 2.29s** at ~8.5 GB/s effective DMA throughput.
+   - Solves the Windows 11 WDDM 24 GB pinned host memory cap via the **Sliding Window Invariant**.
    - Zero CUDA context teardown, zero graph recompilation.
 2. **Gyro-Coder TQ2_0 + A8 PLE N-Gram Support (AgentionAI)**:
-   - MoE 70B (3.8B active) running in 19.9 GB VRAM while querying a 54-58 GB PLE N-gram table on NVMe via `mmap` at 53.55 tok/s.
+   - MoE 70B (3.8B active) running in 19.9 GB VRAM while querying a 54-58 GB PLE N-gram table on NVMe via `mmap` at 44 - 53.5 tok/s.
 3. **Multi-Agent Infrastructure (Zero-Config)**:
-   - `router/vmm_router.py`: OpenAI-compatible reverse proxy (`http://127.0.0.1:8000/v1`) ready for `pi-coding-agent`, Aider, Cursor, Continue.dev, OpenHands.
+   - `router/vmm_router.py`: OpenAI-compatible reverse proxy (`http://127.0.0.1:8000/v1`) with mutual exclusion (`asyncio.Lock`) ready for `pi-coding-agent`, Aider, Cursor, Continue.dev, OpenHands.
    - `pipeline/autonomous_pipeline.py`: Autonomous 3-agent pipeline runner (Architect -> Coder -> Sandbox -> Debugger).
    - `mcp/vmm_mcp_server.py`: Native Model Context Protocol server for IDEs.
+   - `scripts/sync_upstream.py`: Automated tool to monitor and sync updates from upstream JakeATX/llamAmpere, Strata, and AgentionAI.
 
-> **Standalone VMM Swap Patch Note:**
-> If you only need the VMM hot-swapping technology to integrate into upstream `llama.cpp` or another custom engine without cloning `llamAmpere-Ultra`, you can use the standalone patch in [`patches/vmm-swap/`](patches/vmm-swap/) or the dedicated repository:
-> **[bjivanovich2017/llamampere-vmm-swap](https://github.com/bjivanovich2017/llamampere-vmm-swap)**.
+> **Standalone VMM Swap Repository:**
+> If you only need the engine-agnostic VMM hot-swapping patch, router, and MCP server to integrate into upstream `llama.cpp` or another custom runtime without cloning the full engine, see:
+> **[cuda-vmm-swap](https://github.com/bjivanovich/cuda-vmm-swap)**.
 
 ---
 
@@ -286,8 +290,27 @@ The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-or
 - Any help with managing issues, PRs and projects is very appreciated!
 - Read the [CONTRIBUTING.md](CONTRIBUTING.md) for more information
 
-## Acknowledgements
+## Upstream Synchronization
 
+Keep llamAmpere-Ultra up to date with upstream ecosystem developments:
+
+`ash
+# Monitor upstream releases from JakeATX, Strata, and AgentionAI
+python scripts/sync_upstream.py
+
+# Or one-click on Windows PowerShell
+.\scripts\sync-upstream.ps1
+`
+
+## Credits & Acknowledgements
+
+This project builds upon the groundbreaking work of the open-source AI and CUDA systems community:
+
+- **[JakeATX / llamAmpere](https://github.com/JakeATX/llamAmpere)**: Core foundation of the SM86 Ampere execution engine, custom fused MMA kernels (Q8/Q4), FlashAttention I8QK integration, and SJ-KVaRN / turbo4-5 compressed KV cache architectures enabling 96k - 200k+ context windows.
+- **[AgentionAI](https://huggingface.co/agentionai)**: Creators of Gyro-Coder TQ2_0 (MoE 70B with 3.8B active) and the A8 PLE N-Gram speculative table methodology, delivering near-zero syntax error code synthesis.
+- **[Niko1221 / Strata](https://github.com/Niko1221/Strata)**: Conceptual and architectural pioneer in local LLM offloading, memory tiering, and domain expert cache optimization for consumer hardware.
+- **u/enndeeee**: Original author of the CUDA Driver VMM SleepableBuffer concept in [Infernix PR #43](https://github.com/infernix/llama.cpp/pull/43), which inspired our Windows WDDM sliding-window VMM model swapper.
+- **[ggml-org / llama.cpp](https://github.com/ggml-org/llama.cpp)**: The underlying LLM inference framework.
 - [yhirose/cpp-httplib](https://github.com/yhirose/cpp-httplib) - Single-header HTTP server, used by `llama-server` - MIT license
 - [nothings/stb](https://github.com/nothings/stb) - Single-header image format decoder, used by multimodal subsystem - Public domain
 - [nlohmann/json](https://github.com/nlohmann/json) - Single-header JSON library, used by various tools/examples - MIT License
