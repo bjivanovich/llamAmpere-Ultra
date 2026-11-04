@@ -2,7 +2,7 @@ $env:GGML_CUDA_GRAPH_OPT = "1"
 $env:GGML_Q8_TURBO3_MMA_FUSED = "1"
 $env:GGML_CUDA_FA_I8QK = "1"
 
-$modelPath = "C:\Users\bj_iv\Downloads\LLM\agentionai\Qwen3.8-Flash-Next-Gyro-Coder-GGUF\Qwen3.8-Flash-Next-Gyro-Coder-TQ2_0.gguf"
+$modelPath = "D:\models\Qwen3.8-Flash-Next-Gyro-Coder-TQ2_0.gguf"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host " Iniciando Gyro-Coder TQ2_0 (Arquitecto / Depurador)" -ForegroundColor Green
