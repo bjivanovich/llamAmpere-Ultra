@@ -41,6 +41,7 @@ struct llama_layer;
 struct llama_prec_policy;
 
 class llama_moe_cache;
+class llama_ple_prefetch;
 
 struct llama_memory_context_i;
 
@@ -182,6 +183,10 @@ public:
     ggml_tensor * tokens = nullptr; // I32 [n_batch]
     ggml_tensor * embd   = nullptr; // F32 [n_embd, n_batch]
     ggml_tensor * h      = nullptr; // F32 [n_embd, n_batch]
+    bool h_device = false; // fork: the context supplies hidden rows by backend copy
+    // [RTPORT] LLAMA_MTP_PIPELINE: the token embedding row as a device input, written on the stream by the
+    // context (llama_context::mtp_pipe_input) instead of a host get_rows; F32 [n_embd_inp, 1], or nullptr
+    ggml_tensor * tok_row = nullptr;
 
     const int64_t n_embd = 0;
 };
@@ -346,9 +351,25 @@ public:
     ggml_tensor * rs_old_src = nullptr; // I32 [n_older]: older-group rows to carry for seqs whose data moves cells
     ggml_tensor * rs_old_dst = nullptr; // I32 [n_older]
 
+    // --gdn-replay, ubatches of n >= n_rs_seq tokens (every speculative verify): the pending rollback
+    // is data, not topology, so one graph serves every round. s_copy_conv = s_copy + replay_len *
+    // mem_size picks the conv history group; replay_w = K slot weights (1 for the accepted prefix
+    // [0, ckpt_span - replay_len) when the logical state needs the replay, else all 0). s_copy_pair
+    // gathers the replay base from the state/checkpoint pair tensor: the checkpoint row (plane 1)
+    // when the logical state needs the replay, else the state row. nullptr otherwise.
+    ggml_tensor * s_copy_conv      = nullptr; // I32 [n_rs]
+    ggml_tensor * s_copy_conv_main = nullptr; // I32 [n_seqs] view
+    ggml_tensor * s_copy_pair      = nullptr; // I32 [n_rs]
+    ggml_tensor * s_copy_pair_main = nullptr; // I32 [n_seqs] view
+    ggml_tensor * replay_w         = nullptr; // F32 [n_rs_seq]
+
     // fill every rs input (s_copy and the shift or ring tensors) from the memory context; exactly
     // once per ubatch -- both fills consume the pending rollback
     void fill_s_copy(const llama_memory_recurrent_context * m);
+
+    // can_reuse's replay check: the replay fields must match unless replay_w makes them data (then
+    // they and span_new are refreshed from the new context)
+    bool replay_reusable(const llama_memory_recurrent_context * m, const llama_ubatch & ubatch);
 };
 
 class llm_graph_input_cross_embd : public llm_graph_input_i {
@@ -423,6 +444,7 @@ public:
     ggml_tensor * self_sj_kvarn_desc_edge = nullptr; // tiered body: descriptor of the edge tier (nullptr unless edge layers exist)
     // multi-stream SJ-KVaRN: attended (padded) position count per stream of the ubatch; one FA node per stream
     std::vector<uint32_t> sj_kvarn_n_kv_streams;
+    bool skip_unused = false; // fork: KV-only device-input graphs do not consume attention geometry
 
     // note: these have to be copies because in order to be able to reuse a graph, its inputs
     //       need to carry these parameters with them. otherwise, they can point to freed
@@ -864,6 +886,33 @@ using llm_graph_cb = std::function<void(const llama_ubatch & ubatch, ggml_tensor
 
 class llm_graph_result;
 
+// fork: prompt routing is packed across all ubatches before the expert GEMMs.
+struct llm_b1_ffn_bucket {
+    struct span { size_t offset; size_t count; };
+    std::vector<int32_t> rows;
+    std::vector<int32_t> experts;
+    std::vector<float> weights;
+    // Each span belongs to one expert and therefore has unique token rows.
+    std::vector<span> spans;
+};
+
+struct llm_b1_ffn {
+    ggml_tensor * input = nullptr;
+    ggml_tensor * output = nullptr;
+    ggml_tensor * inject = nullptr;
+    ggml_tensor * ids = nullptr;
+    ggml_tensor * weights = nullptr;
+    std::vector<std::vector<int32_t>> expert_rows;
+    std::vector<std::vector<float>> expert_weights;
+    uint32_t max_rows = 8192;
+    size_t piece_first = 0;
+    size_t piece_count = 64; // Bound graph metadata independently of routing skew and the row dial.
+    bool grouped_mmid = false;
+    uint32_t routed_rows = 32768;
+    size_t bucket_index = 0;
+    std::vector<llm_b1_ffn_bucket> buckets;
+};
+
 struct llm_graph_params {
     llm_arch arch = LLM_ARCH_UNKNOWN;
 
@@ -927,10 +976,29 @@ struct llm_graph_params {
     // owning model (EXL3 side tensors for build_lora_mm); may be null for graphs that carry no EXL3 weights
     const llama_model * model = nullptr;
 
+    // [B1] layer-major prefill (LLAMA_B1, qwen4exp): build only the layers [b1_il0, b1_il1) (b1_il1 < 0: to the end).
+    // A range that starts above layer 0 reads the hidden state from b1_carry, a range that stops before the last layer
+    // writes it back there and builds no output. Set after construction.
+    int32_t       b1_il0   = 0;
+    int32_t       b1_il1   = -1;
+    ggml_tensor * b1_carry = nullptr;
+
+    // [PLEPF] the context's PLE page prefetch (null when off); set after construction
+    llama_ple_prefetch * ple_pf = nullptr;
+
+    // [RTPORT] 1-row MTP step whose token embedding row is a device input (LLAMA_MTP_PIPELINE); set after construction
+    bool mtp_tok_row = false;
+    // fork AIPFIX ONEPATH: ggml_moe_bank_onepath_live() when the params were taken; a graph built either way is only
+    // reused while it holds (the one path drops the bank graph)
+    bool moe_onepath_live = false;
+
     // true for a graph built only to reserve compute buffers (llama_context::graph_reserve): its output rows are
     // placeholders and may sit on sequences that have no backend sampler (none is attached yet at context creation)
     // set after construction, so it stays last
     bool is_reserve = false;
+    const llm_b1_ffn * b1_ffn = nullptr;
+    int b1_ffn_phase = 0; // 1: attention/router, 2: packed experts, 3: residual combine
+
 
     // return true if the "other" params would result in a graph with the same topology as with the current params
     //   having the same topology allows us to reuse the graph in some cases
@@ -994,6 +1062,18 @@ struct llm_graph_params {
             return false;
         }
 
+        if (b1_il0 != other.b1_il0 || b1_il1 != other.b1_il1 || b1_carry != other.b1_carry || b1_ffn != other.b1_ffn || b1_ffn_phase != other.b1_ffn_phase) {
+            return false;
+        }
+
+        if (mtp_tok_row != other.mtp_tok_row) {
+            return false;
+        }
+
+        if (moe_onepath_live != other.moe_onepath_live) {
+            return false;
+        }
+
         return
             cparams.embeddings              == other.cparams.embeddings              &&
             cparams.embeddings_nextn        == other.cparams.embeddings_nextn        &&
@@ -1028,6 +1108,9 @@ public:
     ggml_context * get_ctx() const { return ctx_compute.get(); }
 
     int64_t get_max_nodes() const;
+    const llm_b1_ffn * get_b1_ffn() const { return params.b1_ffn; }
+    int get_b1_ffn_phase() const { return params.b1_ffn_phase; }
+    bool get_moe_onepath_live() const { return params.moe_onepath_live; }
 
     void reset();
 
@@ -1072,10 +1155,14 @@ public:
     // ([n_rows] I32) and the logit row of each entry
     std::map<llama_seq_id, ggml_tensor *> t_sampled_rows;
     std::map<llama_seq_id, std::vector<uint32_t>> sampled_rows;
+    // top-k row export (a row-block chain that only truncates): per sequence the K kept ids and logits of each row
+    // ([K, n_rows] I32 and F32), sent to the host instead of the full logit rows
+    std::map<llama_seq_id, std::pair<ggml_tensor *, ggml_tensor *>> t_topk_rows;
     std::vector<llm_graph_fused_node> fused_nodes;
     std::map<llama_seq_id, ggml_tensor *> t_sampled_probs;
 
     std::vector<llm_graph_input_ptr> inputs;
+    bool mtp_device_input = false; // fork: device-input and host-input allocations cannot share a graph
 
     ggml_context_ptr ctx_compute;
 
@@ -1170,12 +1257,17 @@ struct llm_graph_context {
     std::atomic<uint32_t> * draft_vocab_warned; // see llm_graph_params
     const bool is_reserve; // see llm_graph_params
     const std::vector<float> * mtp_chain_samp; // see llm_graph_params
+    const int32_t       b1_il0;   // see llm_graph_params
+    const int32_t       b1_il1;   // see llm_graph_params (-1 = n_layer)
+    ggml_tensor * const b1_carry; // see llm_graph_params
+    llama_ple_prefetch * const ple_pf; // see llm_graph_params
+    const bool mtp_tok_row; // see llm_graph_params
 
     // [#81] logits of the compact draft head for `cur` [n_embd, n], [n_sel, n]: plain mul_mat on the activation the
     // head consumes (EXL3: x_rot = H128(suh * cur), the fused kernel's input glue built from generic ops)
     ggml_tensor * build_draft_vocab_compact(ggml_tensor * head_w, ggml_tensor * head_s, ggml_tensor * cur) const;
 
-    // full-head fallback of build_draft_vocab_logits: counts the reason in the fallback ledger, warns once per context
+    // full-head fallback of build_draft_vocab_logits: warns once per context
     ggml_tensor * draft_vocab_fallback(int reason, const char * detail) const;
 
     // Shared transforms are valid for one graph build only.
@@ -1194,15 +1286,37 @@ struct llm_graph_context {
     mutable struct {
         ggml_tensor * body = nullptr; // seal output (view of the layer's record pool)
         ggml_tensor * desc = nullptr;
+        ggml_tensor * selected = nullptr; // QSA candidate positions; invalid slots lie outside the mask
         int32_t bits_k = 0;
         int32_t bits_v = 0;
         bool fused_rot = false; // Q/output rotation inside the FA node (ggml_sj_kvarn_fused_rot_enabled)
         const std::vector<uint32_t> * n_kv_streams = nullptr; // multi-stream: per-stream n_kv (see llm_graph_input_attn_kv)
         ggml_tensor * wush_ao = nullptr; // EXPERIMENTAL WUSH-KV: output transform replacing the inverse Hadamard
     } sj_kvarn_pending;
+    // QSA prompt (LLAMA_QSA_DIRECT_LISTS): final selected-cell rows [n_sel, n_tokens] for the next flash attention node's
+    // src[8], so the CUDA sparse path builds its per-tile cell lists from them instead of scanning the n_kv-wide mask
+    mutable ggml_tensor * fa_sel_rows = nullptr;
     // multi-stream SJ-KVaRN: per-stream mask views cut to the stream's own n_kv are not contiguous when the ubatch
     // has more than one token row, and FA needs a contiguous mask; the contiguous copies are made once per graph
     // (the mask is shared by every layer)
+    // hot-expert bank of the next build_moe_ffn call (set by the model, consumed by the call):
+    // the selected experts are split between an always-resident hot bank and the regular (cold) bank
+    struct moe_hot_bank {
+        ggml_tensor * up       = nullptr;
+        ggml_tensor * gate     = nullptr;
+        ggml_tensor * down     = nullptr;
+        ggml_tensor * hot_map  = nullptr; // F32 [n_expert]: hot slot or -1
+    };
+    mutable moe_hot_bank  moe_hot;
+    mutable ggml_tensor * moe_weights_override = nullptr;
+    mutable bool          moe_defer_reduce     = false;
+    mutable bool          moe_b1_bypass        = false; // [B1] hot bank call inside the routing phase: compute it now
+    mutable ggml_tensor * moe_route_skip       = nullptr; // per-route value >= 0: the cold MUL_MAT_IDs may skip the route
+    // fork AIPFIX ONECHAIN: prompt batches of a banked layer run one expert chain; after each regular expert product
+    // the bank product of the same projection fills the bank routes (moe_onechain_ids >= 0), see build_moe_ffn
+    mutable const moe_hot_bank * moe_onechain_bank = nullptr;
+    mutable ggml_tensor * moe_onechain_ids  = nullptr; // I32 [n_expert_used, n_tokens]: bank slot or -1
+    mutable ggml_tensor * moe_onechain_cold = nullptr; // F32 [1, n_expert_used, n_tokens]: 1 = regular route, 0 = bank route
     mutable ggml_tensor * sj_kvarn_mask_src = nullptr;
     mutable std::vector<ggml_tensor *> sj_kvarn_mask_s;
 
@@ -1210,6 +1324,7 @@ struct llm_graph_context {
     virtual ~llm_graph_context() = default;
 
     void cb(ggml_tensor * cur, const char * name, int il) const;
+    ggml_tensor * build_moe_onechain_fill(ggml_tensor * regular, ggml_tensor * bank_w, ggml_tensor * x) const;
 
     // true when the last layer must be narrowed to the output rows before the nextn hidden state is captured
     bool crop_before_nextn(const ggml_tensor * inp_out_ids) const {
@@ -1437,6 +1552,22 @@ struct llm_graph_context {
             ggml_tensor * v_cur, // [n_embd_head_v, n_head_v, n_tokens]
                     int   il) const;
 
+    // SJ-KVaRN steps of build_attn above, for model graphs that store K/V and call build_attn_mha themselves
+    // (qwen4exp QSA): rotate q/k/v into the cache basis before the stores (returns true when the FA node rotates
+    // q and un-rotates its output itself), then, after the stores, hand the layer's sealed records and descriptor
+    // to the next build_attn_mha. No-ops unless the cache is SJ-KVaRN.
+    bool build_attn_sj_kvarn_rot(
+            llm_graph_input_attn_kv * inp,
+            ggml_tensor *& q_cur,
+            ggml_tensor *& k_cur,
+            ggml_tensor *& v_cur,
+                    int   il) const;
+
+    void build_attn_sj_kvarn_pend(
+            llm_graph_input_attn_kv * inp,
+                   bool   fused_rot,
+                    int   il) const;
+
     llm_graph_input_attn_k  * build_attn_inp_k() const;
 
     ggml_tensor * build_attn(
@@ -1557,6 +1688,14 @@ struct llm_graph_context {
                 int32_t   state_size,
                 int32_t   n_seqs,
             const llm_graph_get_rows_fn & get_state_rows = nullptr) const;
+
+    // the conv history gather: build_rs, except that under --gdn-replay's static verify graph the rows
+    // come from the pending rollback's group (inp->s_copy_conv)
+    ggml_tensor * build_rs_conv(
+            llm_graph_input_rs * inp,
+            ggml_tensor * s,
+                int32_t   state_size,
+                int32_t   n_seqs) const;
 
     ggml_tensor * build_rwkv_token_shift_load(
         llm_graph_input_rs * inp,

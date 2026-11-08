@@ -1,5 +1,6 @@
 #include "llama-impl.h"
 #include "llama-mmap.h"
+#include "llama-moe-arena.h"
 
 #include "ggml-backend.h"
 #include "gguf.h"
@@ -10,6 +11,13 @@
 #include <climits>
 #include <cstdarg>
 #include <cstring>
+#include <cstdlib>
+#include <thread>
+#ifdef __linux__
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+#endif
 #include <vector>
 #include <sstream>
 
@@ -20,7 +28,8 @@ struct llama_logger_state {
 
 static llama_logger_state g_logger_state;
 
-void llama_prefetch_rows(const ggml_tensor * tensor, const int32_t * rows, size_t n_rows) {
+void llama_prefetch_rows(const ggml_tensor * tensor, const int32_t * rows, size_t n_rows,
+                         std::atomic<size_t> * remaining) {
     if (!tensor || !tensor->data || !tensor->buffer || !ggml_backend_buffer_is_host(tensor->buffer) || n_rows == 0) {
         return;
     }
@@ -37,7 +46,12 @@ void llama_prefetch_rows(const ggml_tensor * tensor, const int32_t * rows, size_
         mr.push_back({ base + (size_t) rows[i] * tensor->nb[1], row_bytes });
     }
 
-    llama_prefetch(std::move(mr));
+    uint64_t available = 0;
+    if (remaining) {
+        try { available = llama_moe_arena::available_memory(); }
+        catch (...) { /* Unknown RAM disables optional read-ahead. */ }
+    }
+    llama_prefetch(std::move(mr), remaining, available);
 }
 
 time_meas::time_meas(int64_t & t_acc, bool disable) : t_start_us(disable ? -1 : ggml_time_us()), t_acc(t_acc) {}
@@ -201,4 +215,40 @@ std::string gguf_kv_to_str(const struct gguf_context * ctx_gguf, int i) {
         default:
             return gguf_data_to_str(type, gguf_get_val_data(ctx_gguf, i), 0);
     }
+}
+
+void llama_thread_off_caller_cpu(std::thread & t) {
+#ifdef __linux__
+    static const bool off = [] {
+        const char * e = getenv("LLAMA_NO_THREAD_UNPIN");
+        return e && atoi(e) != 0;
+    }();
+    if (off || !t.joinable()) {
+        return;
+    }
+    cpu_set_t cur;
+    CPU_ZERO(&cur);
+    if (pthread_getaffinity_np(pthread_self(), sizeof(cur), &cur) != 0 || CPU_COUNT(&cur) != 1) {
+        return;
+    }
+    const long n_cpu = sysconf(_SC_NPROCESSORS_CONF);
+    if (n_cpu < 2) {
+        return;
+    }
+    cpu_set_t want;
+    CPU_ZERO(&want);
+    for (long c = 0; c < n_cpu && c < CPU_SETSIZE; ++c) {
+        if (!CPU_ISSET(c, &cur)) {
+            CPU_SET(c, &want);
+        }
+    }
+    const int rc = pthread_setaffinity_np(t.native_handle(), sizeof(want), &want);
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        LLAMA_LOG_INFO("%s: [PFGAP] helper threads moved off the caller's pinned CPU (rc=%d)\n", __func__, rc);
+    }
+#else
+    (void) t;
+#endif
 }

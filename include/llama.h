@@ -173,6 +173,7 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q5_CR         = 45, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q6_CR         = 46, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_EXL3          = 47, // exllamav3 trellis weights (GGML_TYPE_EXL3_2..8), except 1d tensors
+        LLAMA_FTYPE_MOSTLY_AI4           = 52, // AI+ trellis weights, except 1d tensors
 
         LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
     };
@@ -369,6 +370,9 @@ extern "C" {
         // override key-value pairs of the model meta data
         const struct llama_model_kv_override * kv_overrides;
 
+        // Optional donor for identical output/embedding tensors; storage remains alive with the borrower.
+        const struct llama_model * tensor_borrow_from;
+
         // Keep the booleans together to avoid misalignment during copy-by-value.
         bool vocab_only;      // only load the vocabulary, no weights
         bool check_tensors;   // validate model tensor data
@@ -376,6 +380,7 @@ extern "C" {
         bool no_host;         // bypass host buffer allowing extra buffers to be used
         bool no_alloc;        // only load metadata and simulate memory allocations
         bool load_mtp;        // whether to load MTP layers
+        bool fit_ram;         // cap optional model read-ahead using available host RAM
     };
 
     struct llama_sampler_seq_config {
@@ -421,8 +426,15 @@ extern "C" {
         enum ggml_type type_s; // data type for the gated delta-net recurrent state cache: f32 (default), bf16, f16 or q8_0 [EXPERIMENTAL]
 
         enum llama_moe_cache_mode moe_cache_mode; // runtime MoE expert cache mode
+        int32_t moe_prefetch;                     // experimental: 0 off, -1 auto, 1..3 future layers
         size_t moe_cache_budget_mib;               // 0 uses the provider's available-memory budget
+        int32_t moe_skip_tail;                     // LOSSY: 0 off; 1..9 = leave out a non-resident expert that every token of a single-sequence decode window ranks at this position or later [EXPERIMENTAL]
+        bool moe_skip_mass;                        // LOSSY: enable the configured weight-budget policy independently of route rank
         size_t moe_cache_size; // device cache in bytes for the experts kept in host memory, 0 = disabled [EXPERIMENTAL]
+
+        // Expert keep policy for CPU-held MoE experts (#215/#217) [EXPERIMENTAL]
+        int32_t      moe_draft_keep; // MTP draft context only, lossless for the output: leave out experts at route rank >= N that are not resident on the device (-1 = off)
+        const char * moe_keep_map;   // non-MTP contexts, LOSSY (changes answers): "N" or "a-b:N,c:M,..." per model layer, same rule as moe_draft_keep (NULL or "" = off)
 
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted
@@ -445,6 +457,7 @@ extern "C" {
         uint32_t sj_kvarn_edge_bits_v;
         enum ggml_type sj_kvarn_edge_body_type; // edge-tier codec: COUNT = auto (trellis only for a trellis pair when sj_kvarn_body_type is trellis/auto), F32 scalar, I16 trellis
         uint32_t sj_kvarn_flush_chunk; // adaptive tail: max groups sealed per small (decode) ubatch; 0 = whole flush at once
+        uint32_t kv_gpu_tokens; // fork: QSA resident KV cells with SJ-KVaRN; 0 = keep the full body on device
         const char * sj_kvarn_transform; // EXPERIMENTAL (arXiv 2609.38121 WUSH-KV): per-layer K/V transform file replacing the Hadamard; NULL = off
 
         // Keep the booleans together and at the end of the struct to avoid misalignment during copy-by-value.
@@ -733,6 +746,8 @@ extern "C" {
 
     // Returns the total size of all the tensors in the model in bytes
     LLAMA_API uint64_t llama_model_size(const struct llama_model * model);
+    // Resident pinned expert storage, excluded from prompt-cache RAM budgets.
+    LLAMA_API uint64_t llama_model_moe_arena_size(const struct llama_model * model);
 
     // Get the default chat template. Returns nullptr if not available
     // If name is NULL, returns the default chat template
@@ -953,6 +968,17 @@ extern "C" {
     // bit-identically to a cold one. No-op (false) off the grid, without SJ-KVaRN, or when nothing changes.
     LLAMA_API bool llama_sj_kvarn_prefill_cut(struct llama_context * ctx, llama_seq_id seq_id, llama_pos pos);
 
+    // [#240] For a state blob saved with LLAMA_STATE_SEQ_FLAGS_SJ_EXACT: the sealed end it restores (written in its last
+    // bytes) and, in *pos_end, its cell count n (the position end for text; M-RoPE image tokens share a position, so
+    // the cell count is larger after an image). -1 when the blob carries no SJ-KVaRN exact section. The restore needs the
+    // live cache to still hold the sealed records below that end (llama_sj_kvarn_seq_sealed_end() >= the result).
+    LLAMA_API int32_t llama_sj_kvarn_ckpt_sealed_end(const uint8_t * data, size_t size, llama_pos * pos_end);
+
+    // The tokens of the next prompt call on one sequence, starting at pos0, before it is decoded: models with a disk-mapped
+    // per-layer embedding table start reading the rows it will need now. A following llama_decode of these tokens (or of
+    // a prefix of them) at pos0 continues those reads. No-op for other models and for short calls.
+    LLAMA_API void llama_ple_prefetch_hint(struct llama_context * ctx, const llama_token * tokens, int32_t n_tokens, llama_pos pos0);
+
     // Check if the memory supports shifting
     LLAMA_API bool llama_memory_can_shift(llama_memory_t mem);
 
@@ -1067,6 +1093,20 @@ extern "C" {
 // Getting the state for a seq_id with this flag invalidates all prior states gotten for that seq_id with this flag.
 #define LLAMA_STATE_SEQ_FLAGS_ON_DEVICE 2
 
+// [EVALFLAG] save every cell of the sequence (also SWA-masked ones) with its cell index and the cache head, and on
+// load put each cell back at the same index when that cell is free. A sequence restored into a clean slot then has
+// the same cell layout as the prefill that produced it, so attention adds its terms in the same order (byte-identical
+// continuation on sliding-window models). Both the save and the load must use it; the data is not compatible with
+// states saved without it.
+#define LLAMA_STATE_SEQ_FLAGS_KEEP_LAYOUT 4
+
+// [#240] SJ-KVaRN exact checkpoint: with PARTIAL_ONLY, a hybrid model's SJ-KVaRN attention cache adds a section with
+// its seal state and the open staging rows [sealed end, n) to the partial state, so a restore puts the attention cache
+// back exactly as it was at n (any n, not only the seal grid). The load needs no flag: the section is a suffix that
+// is read when present (older checkpoints without it load as before). On a plain SJ-KVaRN cache (no recurrent part)
+// the flag saves/loads that section alone. See llama_sj_kvarn_ckpt_sealed_end().
+#define LLAMA_STATE_SEQ_FLAGS_SJ_EXACT 8
+
     typedef uint32_t llama_state_seq_flags;
 
     LLAMA_API size_t llama_state_seq_get_size_ext(
@@ -1087,6 +1127,51 @@ extern "C" {
                           size_t   size,
                     llama_seq_id   dest_seq_id,
            llama_state_seq_flags   flags);
+
+    // llama_state_seq_save_file / llama_state_seq_load_file with state flags
+    LLAMA_API size_t llama_state_seq_save_file_ext(
+            struct llama_context * ctx,
+                      const char * filepath,
+                    llama_seq_id   seq_id,
+               const llama_token * tokens,
+                          size_t   n_token_count,
+           llama_state_seq_flags   flags);
+
+    LLAMA_API size_t llama_state_seq_load_file_ext(
+            struct llama_context * ctx,
+                      const char * filepath,
+                    llama_seq_id   dest_seq_id,
+                     llama_token * tokens_out,
+                          size_t   n_token_capacity,
+                          size_t * n_token_count_out,
+           llama_state_seq_flags   flags);
+    // In-call checkpoints: copy the partial state (LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) of seq_id as it stands after
+    // the first n_tokens[i] tokens, while the next llama_decode runs, so one call can hold the prompt checkpoints that
+    // would otherwise each end a call. Each n_tokens[i] must end a ubatch of that call and the batch must hold seq_id
+    // only. The next decode consumes the request; n = 0 drops it. Returns 0 when armed, -1 when the memory has no
+    // partial state this can copy.
+    LLAMA_API int32_t llama_state_seq_capture_arm(
+            struct llama_context * ctx,
+                    llama_seq_id   seq_id,
+               const llama_pos   * n_tokens,
+                         int32_t   n);
+
+    // The fewest tokens that must follow a capture spot in the same call (the ubatch split keeps that many trailing
+    // tokens together, so a spot closer to the end of the call does not end a ubatch); -1 when unsupported.
+    LLAMA_API int32_t llama_state_seq_capture_min_tail(struct llama_context * ctx);
+
+    // Byte size of the largest capture laid out so far by the armed decode (0 until the first one is laid out, reset
+    // by llama_state_seq_capture_arm). Safe to call from another thread while the decode runs.
+    LLAMA_API size_t llama_state_seq_capture_size(struct llama_context * ctx);
+
+    // After the decode: true when capture k is complete. It then sets pos_min/pos_max to the memory's range at that
+    // spot, and until llama_state_seq_capture_select(ctx, -1, ...) llama_state_seq_get_size_ext/get_data_ext with
+    // LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY return the captured state instead of the live one.
+    LLAMA_API bool llama_state_seq_capture_select(
+            struct llama_context * ctx,
+                         int32_t   k,
+                     llama_pos   * pos_min,
+                     llama_pos   * pos_max);
 
     //
     // Decoding
@@ -1145,8 +1230,11 @@ extern "C" {
 
     // Describes the role of subsequent llama_decode() batches for
     // phase-specialized memory allocators. It does not change model math.
+    // LLAMA_DECODE_PHASE_UNKNOWN is 0, the same value as AUTOMATIC. The one-shot
+    // tag llama_set_next_decode_phase() (llama-ext.h) uses UNKNOWN for "no tag".
     enum llama_decode_phase {
         LLAMA_DECODE_PHASE_AUTOMATIC  = 0,
+        LLAMA_DECODE_PHASE_UNKNOWN    = LLAMA_DECODE_PHASE_AUTOMATIC,
         LLAMA_DECODE_PHASE_PROMPT     = 1,
         LLAMA_DECODE_PHASE_GENERATION = 2,
     };

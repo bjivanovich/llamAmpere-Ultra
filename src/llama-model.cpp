@@ -2,6 +2,7 @@
 #include "ggml-cuda.h"
 #endif
 #include "llama-model.h"
+#include "llama-ple-cache.h"
 
 #include "llama-arch.h"
 #include "llama-ext.h"
@@ -27,6 +28,7 @@
 
 #include "ggml.h"
 #include "ggml-cpp.h"
+#include "../ggml/src/ggml-backend-moe-cache.h"
 
 #include <algorithm>
 #include <cassert>
@@ -39,12 +41,19 @@
 #include <cmath>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <mutex>
+#include <cerrno>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params & params) {
     switch (arch) {
@@ -1297,9 +1306,22 @@ static buft_list_t make_gpu_buft_list(ggml_backend_dev_t dev, llama_split_mode s
     return buft_list;
 }
 
+struct llama_borrowed_host_pin {
+    std::unique_ptr<llama_mlock> locked;
+    void * data = nullptr;
+    void (*unpin)(void *) = nullptr;
+    ~llama_borrowed_host_pin() {
+        if (unpin) { unpin(data); }
+    }
+};
+
 struct llama_model::impl {
+    std::shared_ptr<impl> tensor_donor;
+
     impl() = default;
-    ~impl() = default;
+    ~impl() {
+        if (moe_resident) { moe_resident_api.resident_destroy(moe_resident); }
+    }
 
     uint64_t n_elements = 0;
 
@@ -1311,6 +1333,11 @@ struct llama_model::impl {
 
     // model memory mapped files
     llama_mmaps mappings;
+    std::unique_ptr<llama_moe_arena> moe_arena;
+    std::mutex moe_resident_mutex;
+    ggml_moe_cache_api moe_resident_api = {};
+    void * moe_resident = nullptr;
+    bool moe_resident_attempted = false;
 
     // objects representing data potentially being locked in memory
     llama_mlocks mlock_bufs;
@@ -1318,6 +1345,8 @@ struct llama_model::impl {
 
     // contexts where the model tensors metadata is stored as well as the corresponding buffers:
     std::vector<std::pair<ggml_context_ptr, std::vector<ggml_backend_buffer_ptr>>> ctxs_bufs;
+    std::mutex borrowed_host_mutex;
+    std::map<const ggml_tensor *, std::unique_ptr<llama_borrowed_host_pin>> borrowed_host_locks;
 
     buft_list_t cpu_buft_list;
     std::map<ggml_backend_dev_t, buft_list_t> gpu_buft_list;
@@ -1386,7 +1415,10 @@ void llama_prec_policy::load(llama_model_loader & ml, const llama_model & model)
     }
 }
 
-llama_model::llama_model(const llama_model_params & params) : params(params), pimpl(std::make_unique<impl>()) {
+llama_model::llama_model(const llama_model_params & params) : params(params), pimpl(std::make_shared<impl>()) {
+    if (params.tensor_borrow_from) {
+        pimpl->tensor_donor = params.tensor_borrow_from->pimpl;
+    }
     if (params.tensor_split != nullptr) {
         // llama_model_params stores tensor_split as a borrowed pointer, but the model
         // may need it later for tensor-parallel KV-cache split metadata.
@@ -1397,9 +1429,17 @@ llama_model::llama_model(const llama_model_params & params) : params(params), pi
 }
 
 llama_model::~llama_model() {
+    for (const void * data : moe_bank_registered) {
+        ggml_moe_bank_unregister(data);
+    }
     for (auto * lora : loras) {
         delete lora;
     }
+#ifndef _WIN32
+    for (int fd : b1_fds) {
+        close(fd);
+    }
+#endif
 }
 
 void llama_model_base::load_stats(llama_model_loader & ml) {
@@ -2050,8 +2090,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             }
         }
     }
-    // EXL3 (exllamav3 trellis) side tensors: every EXL3 weight W[K, N] carries .suh (K) and .svh (N) f32 vectors,
-    // and the file carries one shared 128x128 Hadamard (exl3_had128.weight). See build_lora_mm.
+    // fork: EXL3 W[K,N,E] carries F16/F32 side tensors .suh[K,E] and .svh[N,E].
+    // The file also carries the shared 128x128 Hadamard exl3_had128.weight. See build_lora_mm.
     {
         auto exl3_side_tensors = [&](ggml_tensor * w, llm_tensor t, int bid) {
             // decide from the FILE, not the field: a weight this context skips (e.g. the nextn layer in the main
@@ -2062,14 +2102,14 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             }
             if (!w) {
                 const int skip = TENSOR_NOT_REQUIRED | TENSOR_SKIP;
-                create_tensor(tn(t, "suh", bid), {meta->ne[0]}, skip);
-                create_tensor(tn(t, "svh", bid), {meta->ne[1]}, skip);
+                create_tensor(tn(t, "suh", bid), {meta->ne[0], meta->ne[2]}, skip);
+                create_tensor(tn(t, "svh", bid), {meta->ne[1], meta->ne[2]}, skip);
                 return;
             }
             GGML_ASSERT(ggml_exl3_bits(w->type) != 0);
             exl3_side side;
-            side.suh = create_tensor(tn(t, "suh", bid), {w->ne[0]}, 0);
-            side.svh = create_tensor(tn(t, "svh", bid), {w->ne[1]}, 0);
+            side.suh = create_tensor(tn(t, "suh", bid), {w->ne[0], w->ne[2]}, 0);
+            side.svh = create_tensor(tn(t, "svh", bid), {w->ne[1], w->ne[2]}, 0);
             exl3_sides[w] = side;
         };
         exl3_side_tensors(output, LLM_TENSOR_OUTPUT, -1);
@@ -2084,6 +2124,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             exl3_side_tensors(layer.ffn_gate,  LLM_TENSOR_FFN_GATE,  i);
             exl3_side_tensors(layer.ffn_up,    LLM_TENSOR_FFN_UP,    i);
             exl3_side_tensors(layer.ffn_down,  LLM_TENSOR_FFN_DOWN,  i);
+            const char * cpu_exl3 = getenv("GGML_CPU_EXL3");
+            if (cpu_exl3 && strcmp(cpu_exl3, "1") == 0) {
+                exl3_side_tensors(layer.ffn_gate_exps,    LLM_TENSOR_FFN_GATE_EXPS,    i);
+                exl3_side_tensors(layer.ffn_up_exps,      LLM_TENSOR_FFN_UP_EXPS,      i);
+                exl3_side_tensors(layer.ffn_down_exps,    LLM_TENSOR_FFN_DOWN_EXPS,    i);
+                exl3_side_tensors(layer.ffn_gate_up_exps, LLM_TENSOR_FFN_GATE_UP_EXPS, i);
+            }
             exl3_side_tensors(layer.ssm_in,    LLM_TENSOR_SSM_IN,    i);
             exl3_side_tensors(layer.ssm_out,   LLM_TENSOR_SSM_OUT,   i);
             exl3_side_tensors(layer.ssm_alpha, LLM_TENSOR_SSM_ALPHA, i);
@@ -2122,8 +2169,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     // per-tensor activation precision policy
     prec_policy.load(ml, *this);
 
-    ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
+    const char * pin_borrowed = std::getenv("LLAMA_MTP_PIN_BORROWED_HOST");
+    const bool private_dense = pin_borrowed && std::strcmp(pin_borrowed, "1") == 0 && !devices.empty() &&
+        std::strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(devices.front().dev)), "CUDA") == 0;
+    ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr, private_dense, params.fit_ram);
+    prefetch_remaining.store(ml.prefetch_remaining, std::memory_order_relaxed);
     pimpl->mappings.reserve(ml.mappings.size());
+    pimpl->moe_arena = ml.load_moe_arena(params.progress_callback, params.progress_callback_user_data, params.fit_ram);
 
     // create the backend buffers
     std::vector<std::pair<ggml_context *, llama_buf_map>> ctx_buf_maps;
@@ -2139,6 +2191,15 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
         // skip contexts without tensors
         if (ggml_get_first_tensor(ctx) == nullptr) {
+            continue;
+        }
+        bool allocated = true;
+        for (auto * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
+            allocated = allocated && t->data != nullptr;
+        }
+        if (allocated) {
+            pimpl->ctxs_bufs.emplace_back(std::move(ctx_ptr), std::vector<ggml_backend_buffer_ptr>{});
+            ctx_buf_maps.emplace_back(ctx, llama_buf_map{});
             continue;
         }
 
@@ -2263,6 +2324,39 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         if (!ml.load_all_data(ctx, buf_map, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
             return false;
         }
+    }
+
+    if (const char * profile = getenv("LLAMA_PLE_PROFILE"); profile && *profile && per_layer_tok_embd) {
+        if (arch != LLM_ARCH_QWEN4EXP || !can_prefetch.count(per_layer_tok_embd)) {
+            throw std::runtime_error("PLE RAM profile requires a lazily mapped qwen4exp table");
+        }
+        ple_cache = llama_ple_cache::load(per_layer_tok_embd, profile);
+        can_prefetch.erase(per_layer_tok_embd);
+    }
+
+    // [B1] remember where the expert tensors live in the files, so the layer-major prefill can copy borrowed resident
+    // experts back from there (the loader closes its files when it returns)
+    if (const char * e = getenv("LLAMA_B1"); e && atoi(e) != 0) {
+#ifndef _WIN32
+        std::map<uint16_t, int> fd_of;
+        for (const auto & [name, w] : ml.weights_map) {
+            if (name.find("_exps") == std::string::npos) {
+                continue;
+            }
+            auto it = fd_of.find(w.idx);
+            if (it == fd_of.end()) {
+                const int fd = dup(ml.files.at(w.idx)->file_id());
+                if (fd < 0) {
+                    LLAMA_LOG_WARN("%s: [B1] dup of model file %u failed, resident experts cannot be lent\n", __func__, w.idx);
+                    b1_src.clear();
+                    break;
+                }
+                b1_fds.push_back(fd);
+                it = fd_of.emplace(w.idx, fd).first;
+            }
+            b1_src[name] = { it->second, w.offs, ml.files.at(w.idx)->read_alignment() };
+        }
+#endif
     }
 
     if (use_mmap_buffer) {
@@ -2428,10 +2522,276 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                 rotations.size(), sign_tensors.size());
     }
 
+    register_moe_bank();
+
     return true;
 }
 
+// Tell ggml which experts of each regular expert tensor also live in the always-resident hot bank, so the regular
+// (cold) call leaves them out and the expert cache never plans them; every main-layer expert tensor is registered
+// so the cache's resident census can name its layer. Data pointers are final here (buffers allocated and loaded).
+void llama_model::register_moe_bank() {
+    const char * dbg = getenv("GGML_MOE_HOT_DBG");
+    const bool   hot_dbg = dbg && atoi(dbg) != 0; // debug modes run the bank's experts in the regular call
+    const int    n_main  = (int) std::min<uint32_t>(hparams.n_layer(), (uint32_t) layers.size());
+    int    n_bank_layers = 0;
+    size_t n_bank = 0, bank_bytes = 0;
+    // LLAMA_MOE_BANK_KEEP loads a prefix of each bank (llama-model-loader.cpp): the slots past it leave the hot map,
+    // so their experts are regular ones everywhere (graph, cache, arena)
+    for (int il = 0; il < n_main; ++il) {
+        const auto & layer = layers[il];
+        ggml_tensor * map = layer.ffn_exps_hot_map;
+        if (!map || map->type != GGML_TYPE_F32 || !layer.ffn_down_exps_hot) {
+            continue;
+        }
+        std::vector<float> slot(ggml_nelements(map));
+        ggml_backend_tensor_get(map, slot.data(), 0, ggml_nbytes(map));
+        bool cut = false;
+        for (float & s : slot) {
+            if (s >= (float) layer.ffn_down_exps_hot->ne[2]) {
+                s = -1.0f;
+                cut = true;
+            }
+        }
+        if (cut) {
+            ggml_backend_tensor_set(map, slot.data(), 0, ggml_nbytes(map));
+        }
+    }
+    for (int il = 0; il < n_main; ++il) {
+        const auto & layer = layers[il];
+        ggml_tensor * regular[] = { layer.ffn_up_exps, layer.ffn_gate_exps, layer.ffn_down_exps, layer.ffn_gate_up_exps };
+        ggml_tensor * any = layer.ffn_down_exps ? layer.ffn_down_exps : layer.ffn_gate_up_exps;
+        if (!any || any->ne[2] <= 0 || any->ne[2] > 512) {
+            continue;
+        }
+        const int32_t n_expert = (int32_t) any->ne[2];
+        std::vector<uint8_t> in_bank;
+        std::vector<int32_t> bank_slot;
+        const ggml_tensor * map = layer.ffn_exps_hot_map;
+        // the graph runs a bank smaller than 2 x n_expert_used on the regular tensors alone (llama-graph.cpp)
+        if (!hot_dbg && map && map->type == GGML_TYPE_F32 && ggml_nelements(map) == n_expert && layer.ffn_down_exps_hot &&
+                layer.ffn_down_exps_hot->ne[2] >= 2 * (int64_t) hparams.n_expert_used(il)) {
+            std::vector<float> slot(n_expert);
+            ggml_backend_tensor_get(map, slot.data(), 0, n_expert * sizeof(float));
+            in_bank.resize(n_expert);
+            bank_slot.assign(n_expert, -1);
+            size_t n = 0;
+            for (int32_t e = 0; e < n_expert; ++e) {
+                in_bank[e] = slot[e] >= 0.0f;
+                n += in_bank[e];
+                bank_slot[e] = in_bank[e] ? (int32_t) slot[e] : -1;
+            }
+            if (n > 0) {
+                n_bank_layers++;
+                n_bank += n;
+                for (const ggml_tensor * t : { layer.ffn_up_exps_hot, layer.ffn_gate_exps_hot, layer.ffn_down_exps_hot }) {
+                    bank_bytes += t ? ggml_nbytes(t) : 0;
+                }
+            } else {
+                in_bank.clear();
+            }
+        }
+        // fork AIPFIX ONEPATH: the expert cache also learns where each bank expert's rows are (device bank tensors)
+        ggml_tensor * hot[] = { layer.ffn_up_exps_hot, layer.ffn_gate_exps_hot, layer.ffn_down_exps_hot, nullptr };
+        for (int k = 0; k < 4; ++k) {
+            ggml_tensor * t = regular[k];
+            if (t && t->data && t->ne[2] == n_expert) {
+                ggml_moe_bank_register(t->data, il, n_expert, in_bank.empty() ? nullptr : in_bank.data());
+                moe_bank_registered.push_back(t->data);
+                if (!in_bank.empty() && hot[k] && hot[k]->data && hot[k]->buffer &&
+                        !ggml_backend_buffer_is_host(hot[k]->buffer) &&
+                        hot[k]->ne[0] == t->ne[0] && hot[k]->ne[1] == t->ne[1] &&
+                        *std::max_element(bank_slot.begin(), bank_slot.end()) < hot[k]->ne[2]) {
+                    ggml_moe_bank_register_rows(t->data, hot[k]->data, hot[k]->type, hot[k]->nb[2], bank_slot.data());
+                }
+            }
+        }
+    }
+    if (n_bank > 0) {
+        LLAMA_LOG_INFO("[moe-bank] %zu experts in %d layers always resident (%.1f MiB)\n", n_bank, n_bank_layers, bank_bytes / 1048576.0);
+        // fork AIPFIX BANKDET: with a bank, which experts the prompt leaves in the expert cache follows fill timing,
+        // so an expert may be computed from its cache slot in one run and from the just-copied path in another.
+        // Both use the same weights; only the summation order differs, so reruns can differ in last-digit rounding
+        // (quality unchanged). LLAMA_MOE_BANK_DET=1 selects the deterministic cache mode (GGML_MOE_CACHE_DET) with
+        // prompt queue limits that never bind, for identical reruns. It also selects GGML_MOE_BANK_P2_SAME=1 (copied
+        // routes run the same 3XS kernel as cached ones): with the miss-list kernel instead, reruns still differed
+        // (home dw1 identity, 11-04: P2_SAME=0 reruns diverged at token 71, P2_SAME=1 reruns 256/256 identical).
+        // Off by default to keep the timing-driven fill and its speed. Explicit GGML_* settings win.
+        const char * bd = getenv("LLAMA_MOE_BANK_DET");
+        if (bd && atoi(bd) != 0) {
+#ifdef _WIN32
+            if (!getenv("GGML_MOE_CACHE_DET"))           { _putenv_s("GGML_MOE_CACHE_DET", "1"); }
+            if (!getenv("GGML_CUDA_MOE_CACHE_QUEUE"))    { _putenv_s("GGML_CUDA_MOE_CACHE_QUEUE", "65536"); }
+            if (!getenv("GGML_CUDA_MOE_CACHE_QUEUE_MB")) { _putenv_s("GGML_CUDA_MOE_CACHE_QUEUE_MB", "1024"); }
+            if (!getenv("GGML_MOE_BANK_P2_SAME"))        { _putenv_s("GGML_MOE_BANK_P2_SAME", "1"); }
+#else
+            setenv("GGML_MOE_CACHE_DET", "1", 0);
+            setenv("GGML_CUDA_MOE_CACHE_QUEUE", "65536", 0);
+            setenv("GGML_CUDA_MOE_CACHE_QUEUE_MB", "1024", 0);
+            setenv("GGML_MOE_BANK_P2_SAME", "1", 0);
+#endif
+            LLAMA_LOG_INFO("[moe-bank] deterministic expert cache: det=%s queue=%s/%s MiB p2_same=%s\n", getenv("GGML_MOE_CACHE_DET"),
+                    getenv("GGML_CUDA_MOE_CACHE_QUEUE"), getenv("GGML_CUDA_MOE_CACHE_QUEUE_MB"), getenv("GGML_MOE_BANK_P2_SAME"));
+        } else {
+            LLAMA_LOG_INFO("[moe-bank] bank: reruns may differ in last-digit rounding; LLAMA_MOE_BANK_DET=1 for identical reruns\n");
+        }
+    }
+    const size_t released = drop_moe_bank_host_copies();
+
+    // fork AIPFIX BANKKEEP: every regular expert is served from the pinned arena, never from NVMe while decoding, so
+    // a smaller bank (more regular copies kept) costs RAM here. With LLAMA_MOE_BANK_KEEP set, MemAvailable under
+    // LLAMA_MOE_RAM_FLOOR_MIB (default 5120) stops the load.
+    const auto * arena = pimpl->moe_arena.get();
+    long long avail_kib = -1;
+    if (std::FILE * f = std::fopen("/proc/meminfo", "r")) {
+        char line[256];
+        while (std::fgets(line, sizeof(line), f)) {
+            if (std::sscanf(line, "MemAvailable: %lld kB", &avail_kib) == 1) { break; }
+        }
+        std::fclose(f);
+    }
+    long long majflt = -1;
+    if (std::FILE * f = std::fopen("/proc/self/stat", "r")) {
+        char buf[1024];
+        const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+        buf[n] = 0;
+        std::fclose(f);
+        // field 12 (majflt) counts from the end of the comm field "(...)"
+        if (const char * p = std::strrchr(buf, ')')) {
+            long long v[10] = {};
+            if (std::sscanf(p + 1, " %*c %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld",
+                        &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]) == 10) {
+                majflt = v[8];
+            }
+        }
+    }
+    const size_t arena_bytes = arena && arena->data ? arena->size : 0;
+    const char * keep = getenv("LLAMA_MOE_BANK_KEEP");
+    if (!arena_bytes && !(keep && *keep)) {
+        return;
+    }
+    LLAMA_LOG_INFO("[moe-bank] ram: arena %.2f GiB held (%.2f GiB released), MemAvailable %.2f GiB, major faults %lld\n",
+            (arena_bytes - std::min(released, arena_bytes)) / 1073741824.0, released / 1073741824.0,
+            avail_kib / 1048576.0, majflt);
+    if (keep && *keep && avail_kib >= 0) {
+        const char * floor_env = getenv("LLAMA_MOE_RAM_FLOOR_MIB");
+        const long long floor_mib = floor_env && *floor_env ? atoll(floor_env) : 5120;
+        if (avail_kib / 1024 < floor_mib) {
+            throw std::runtime_error(format("[moe-bank] LLAMA_MOE_BANK_KEEP=%s leaves %.2f GiB of RAM available, under the %.2f GiB floor",
+                    keep, avail_kib / 1048576.0, floor_mib / 1024.0));
+        }
+    }
+}
+
+// fork AIPNEXTK BANKDROP: one copy of each weight in use. A bank expert's regular (IQ3/Q2) bytes in the pinned expert
+// arena are never needed: the bank call computes the expert and the regular call routes it with weight 0 (the hit/miss
+// kernels skip it, and device uploads of its range write zeros). Their arena pages are released here; the bytes stay
+// on NVMe in the model file. LLAMA_MOE_BANK_DROP=0 keeps them.
+size_t llama_model::drop_moe_bank_host_copies() {
+    const char * setting = getenv("LLAMA_MOE_BANK_DROP");
+    if (setting && strcmp(setting, "0") == 0) { return 0; }
+    const char * permanent = getenv("LLAMA_MOE_PERMANENT_MIB");
+    if (permanent && *permanent && strcmp(permanent, "0") != 0) { return 0; } // the permanent-expert discard owns the arena
+    auto * arena = pimpl->moe_arena.get();
+    if (!arena || !arena->data || !arena->size) { return 0; }
+    const uintptr_t base = (uintptr_t) arena->data;
+    std::vector<std::pair<size_t, size_t>> ranges;
+    std::vector<ggml_moe_bank_hole> holes;
+    const int n_main = (int) std::min<uint32_t>(hparams.n_layer(), (uint32_t) layers.size());
+    for (int il = 0; il < n_main; ++il) {
+        const auto & layer = layers[il];
+        for (const ggml_tensor * t : { layer.ffn_up_exps, layer.ffn_gate_exps, layer.ffn_down_exps, layer.ffn_gate_up_exps }) {
+            if (!t || !t->data) { continue; }
+            const uint8_t * in_bank = ggml_moe_bank_lookup(t->data);
+            const uintptr_t data = (uintptr_t) t->data;
+            if (!in_bank || data < base || data - base > arena->size || ggml_nbytes(t) > arena->size - (data - base)) { continue; }
+            const size_t stride = t->nb[2];
+            // fork: interleaved expert strides include other projections, which must stay intact.
+            GGML_ASSERT(ggml_is_contiguous_2(t));
+            const size_t bytes = ggml_row_size(t->type, t->ne[0]) * (size_t) t->ne[1];
+            for (int64_t e = 0; e < t->ne[2]; ++e) {
+                if (!in_bank[e]) { continue; }
+                const size_t off = (data - base) + (size_t) e * stride;
+                if (!ranges.empty() && ranges.back().first + ranges.back().second == off) {
+                    ranges.back().second += bytes;
+                    holes.back().end += bytes;
+                } else {
+                    ranges.emplace_back(off, bytes);
+                    holes.push_back({ base + off, base + off + bytes });
+                }
+            }
+        }
+    }
+    if (ranges.empty()) { return 0; }
+    // register the holes first: from here on every device upload of these bytes writes zeros
+    ggml_moe_bank_holes_set(holes.data(), holes.size());
+    const int64_t t0 = ggml_time_us();
+    try {
+        const size_t released = arena->discard(ranges);
+        LLAMA_LOG_INFO("[moe-bank] released %.2f GiB of arena RAM holding bank experts' regular copies (%zu ranges, %.1f ms)\n",
+                released / 1073741824.0, ranges.size(), (ggml_time_us() - t0) / 1000.0);
+        return released;
+    } catch (const std::exception & error) {
+        // nothing was released; the uploads still write zeros for these routes, which is the same math (weight 0)
+        LLAMA_LOG_WARN("[moe-bank] arena release failed, bank experts' regular copies stay in RAM: %s\n", error.what());
+    }
+    return 0;
+}
+
+void llama_model::pin_borrowed_host_tensor(ggml_tensor * tensor) const {
+    if (!ggml_backend_buffer_is_host(tensor->buffer)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(pimpl->borrowed_host_mutex);
+    if (pimpl->borrowed_host_locks.count(tensor)) {
+        return;
+    }
+    const size_t bytes = ggml_nbytes(tensor);
+    auto pinned = std::make_unique<llama_borrowed_host_pin>();
+    const char * method = "mlock";
+    if (!devices.empty() && std::strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(devices.front().dev)), "CUDA") == 0) {
+        auto reg = ggml_backend_dev_backend_reg(devices.front().dev);
+        auto pin = (bool (*)(void *, size_t)) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_host_pin");
+        auto unpin = (void (*)(void *)) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_host_unpin");
+        if (!pin || !unpin || !pin(tensor->data, bytes)) {
+#ifndef __linux__
+            LLAMA_LOG_WARN("%s: cannot page-lock borrowed host %s on this platform; leaving it unpinned\n", __func__, tensor->name);
+            return;
+#else
+            throw std::runtime_error(format("cannot pin borrowed host tensor %s via CUDA; request-time weight residency is required", tensor->name));
+#endif
+        }
+        pinned->data = tensor->data;
+        pinned->unpin = unpin;
+        method = "CUDA host registration (private dense pages)";
+    } else {
+        pinned->locked = std::make_unique<llama_mlock>();
+        pinned->locked->init(tensor->data);
+        pinned->locked->grow_to(bytes);
+        if (pinned->locked->locked_size() < bytes) {
+            throw std::runtime_error(format("cannot pin borrowed host tensor %s; request-time weight residency is required", tensor->name));
+        }
+    }
+    pimpl->borrowed_host_locks.emplace(tensor, std::move(pinned));
+    LLAMA_LOG_INFO("%s: pinned borrowed host %s (%.2f MiB) via %s; donor-owned, no second weight allocation\n", __func__, tensor->name, bytes / 1048576.0, method);
+}
+
 ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
+    // fork: Reuse only dense, byte-identical tensors. The donor retains their buffers and metadata.
+    if (params.tensor_borrow_from && n_devices() <= 1 && params.tensor_borrow_from->n_devices() <= 1 &&
+            dev_output() == params.tensor_borrow_from->dev_output() && split_mode() != LLAMA_SPLIT_MODE_TENSOR &&
+            params.tensor_borrow_from->split_mode() != LLAMA_SPLIT_MODE_TENSOR && !(flags & (TENSOR_SKIP | TENSOR_DUPLICATED | TENSOR_ALLOW_RESHAPE)) &&
+            (tn.tensor == LLM_TENSOR_OUTPUT || tn.tensor == LLM_TENSOR_TOKEN_EMBD)) {
+        auto * donor = tn.tensor == LLM_TENSOR_OUTPUT ? params.tensor_borrow_from->output : params.tensor_borrow_from->tok_embd;
+        if (donor && ml.try_borrow_tensor(tn, ne, donor)) {
+            // fork: Keep shared CPU weights resident without locking the PLE table.
+            if (const char * pin = std::getenv("LLAMA_MTP_PIN_BORROWED_HOST"); pin && std::atoi(pin) != 0) {
+                params.tensor_borrow_from->pin_borrowed_host_tensor(donor);
+            }
+            tensors_by_name.emplace_back(donor->name, donor);
+            return donor;
+        }
+    }
     const buft_list_t * buft_list_layer = nullptr;
     if (tn.bid != -1) {
         // blocks that are not model layers (e.g. the blocks of a head) go with the output
@@ -2493,6 +2853,9 @@ llama_split_mode llama_model::split_mode() const {
 
 std::map<ggml_backend_buffer_type_t, size_t> llama_model::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> ret;
+    if (pimpl->moe_arena) {
+        ret[ggml_backend_buffer_get_type(pimpl->moe_arena->buffer.get())] += pimpl->moe_arena->size;
+    }
     for (const auto & [ctx, bufs] : pimpl->ctxs_bufs) {
         if (hparams.no_alloc) {
             GGML_ASSERT(bufs.size() == 1);
@@ -3172,7 +3535,9 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                 const bool mtp_on_hybrid_qwen =
                     params.ctx_type == LLAMA_CONTEXT_TYPE_MTP &&
                     (arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE ||
-                     arch == LLM_ARCH_QWEN4EXP || arch == LLM_ARCH_BAILINGMOE3);
+                     arch == LLM_ARCH_BAILINGMOE3);
+                // qwen4exp is not in this list: its MTP graph (graph_mtp) reads a hybrid memory, built below with
+                // filters that keep only the MTP block's attention and indexer (a plain KV cache crashes in build_inp_mem_hybrid)
 
                 const bool mtp_on_hybrid_nemotron =
                     params.ctx_type == LLAMA_CONTEXT_TYPE_MTP && arch == LLM_ARCH_NEMOTRON_H_MOE;
@@ -3300,7 +3665,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* unified           */ cparams.kv_unified,
                             /* filter_attn       */ std::move(filter_attn),
                             /* filter_recr       */ std::move(filter_recr),
-                            /* filter_idx        */ std::move(filter_idx));
+                            /* filter_idx        */ std::move(filter_idx),
+                            /* sj_kvarn          */ params.sj_kvarn);
                     } else {
                         res = new llama_memory_hybrid(
                             /* model             */ *this,
@@ -3519,12 +3885,14 @@ llama_model_params llama_model_default_params() {
         /*.progress_callback           =*/ nullptr,
         /*.progress_callback_user_data =*/ nullptr,
         /*.kv_overrides                =*/ nullptr,
+        /*.tensor_borrow_from          =*/ nullptr,
         /*.vocab_only                  =*/ false,
         /*.check_tensors               =*/ false,
         /*.use_extra_bufts             =*/ true,
         /*.no_host                     =*/ false,
         /*.no_alloc                    =*/ false,
         /*.load_mtp                    =*/ false,
+        /*.fit_ram                     =*/ false,
     };
 
     return result;
@@ -3927,6 +4295,79 @@ int32_t llama_model_desc(const llama_model * model, char * buf, size_t buf_size)
 
 llama_ftype llama_model_ftype(const llama_model * model) {
     return model->ftype();
+}
+
+size_t llama_model::moe_arena_size() const {
+    return pimpl->moe_arena ? pimpl->moe_arena->size : 0;
+}
+
+void llama_model::moe_resident_init(ggml_backend_dev_t device, const ggml_moe_cache_tensor_desc * tensors, int count) const {
+    const char * setting = getenv("LLAMA_MOE_PERMANENT_MIB");
+    if (!setting || !*setting || strcmp(setting, "0") == 0) { return; }
+    std::lock_guard<std::mutex> lock(pimpl->moe_resident_mutex);
+    if (pimpl->moe_resident_attempted) { return; }
+    pimpl->moe_resident_attempted = true;
+    char * end = nullptr;
+    errno = 0;
+    const unsigned long long mib = strtoull(setting, &end, 10);
+    if (errno || !end || *end || !mib || mib > 3072) {
+        throw std::runtime_error("LLAMA_MOE_PERMANENT_MIB must be in [1,3072]");
+    }
+    auto * arena = pimpl->moe_arena.get();
+    if (!arena || !device || !tensors || count <= 0) {
+        throw std::runtime_error("permanent experts require a pinned model arena and GPU");
+    }
+    const auto api = ggml_moe_cache_get(ggml_backend_dev_backend_reg(device));
+    if (!api.resident_create || !api.resident_destroy || !api.resident_spans || !api.resident_dropped || !api.host_restore) {
+        throw std::runtime_error("permanent expert provider is unavailable");
+    }
+    void * resident = api.resident_create(device, tensors, count, (size_t) mib << 20);
+    if (!resident) { throw std::runtime_error("cannot create permanent profile expert storage"); }
+    pimpl->moe_resident_api = api;
+    pimpl->moe_resident = resident;
+    try {
+        const size_t n = api.resident_spans(resident, nullptr, 0);
+        if (!n || n > (size_t) count * hparams.n_expert) {
+            throw std::runtime_error("invalid permanent expert span count");
+        }
+        std::vector<ggml_moe_resident_span> spans(n);
+        if (api.resident_spans(resident, spans.data(), n) != n) {
+            throw std::runtime_error("permanent expert spans changed at startup");
+        }
+        std::vector<std::pair<size_t, size_t>> covered;
+        covered.reserve(n);
+        const uintptr_t base = (uintptr_t) arena->data;
+        for (const auto & span : spans) {
+            const uintptr_t host = (uintptr_t) span.host;
+            if (host < base || host - base > arena->size || span.size > arena->size - (host - base) || !span.device) {
+                throw std::runtime_error("permanent expert span is outside its model arena");
+            }
+            covered.emplace_back(host - base, span.size);
+        }
+        api.resident_dropped(resident, +[](void * opaque) -> int {
+            try { static_cast<llama_moe_arena *>(opaque)->pin_restored(); return 1; }
+            catch (const std::exception & error) {
+                LLAMA_LOG_ERROR("permanent expert host restore failed: %s\n", error.what());
+                return 0;
+            }
+        }, arena);
+        const size_t released = arena->discard(covered);
+        if (!released) { throw std::runtime_error("permanent experts did not release any host pages"); }
+        LLAMA_LOG_INFO("%s: permanent expert host pages released=%zu bytes (%.2f MiB), original GPU spans=%zu arena_base=%p arena_bytes=%zu\n",
+                __func__, released, released / 1048576.0, n, arena->data, arena->size);
+    } catch (...) {
+        // A partial discard must restore bytes before an outer caller can recover.
+        if (!api.host_restore(arena->data, arena->size)) {
+            GGML_ABORT("cannot restore permanent expert host pages after startup failure");
+        }
+        api.resident_destroy(resident);
+        pimpl->moe_resident = nullptr;
+        throw;
+    }
+}
+
+uint64_t llama_model_moe_arena_size(const llama_model * model) {
+    return model ? model->moe_arena_size() : 0;
 }
 
 uint64_t llama_model_size(const llama_model * model) {

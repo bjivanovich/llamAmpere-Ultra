@@ -80,13 +80,14 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `-ot, --override-tensor <tensor name pattern>=<buffer type>,...` | override tensor buffer type<br/>(env: LLAMA_ARG_OVERRIDE_TENSOR) |
 | `-cmoe, --cpu-moe` | keep all Mixture of Experts (MoE) weights in the CPU<br/>(env: LLAMA_ARG_CPU_MOE) |
 | `-ncmoe, --n-cpu-moe N` | keep the Mixture of Experts (MoE) weights of the first N layers in the CPU<br/>(env: LLAMA_ARG_N_CPU_MOE) |
+| `--moe-keep-map MAP` | lossy, opt-in: main-model experts at route rank >= N that are not resident in VRAM are left out (this changes answers). MAP = N (every layer) or a list of L:N, A-B:N, *:N (for example 0-11:10,12-47:5); unlisted layers keep every expert (default: off)<br/>(env: LLAMA_ARG_MOE_KEEP_MAP) |
 | `-ncffn, --n-cpu-ffn N` | keep the dense FFN weights of the first N layers in the CPU<br/>(dense models; for MoE expert weights use --n-cpu-moe)<br/>(env: LLAMA_ARG_N_CPU_FFN) |
 | `-ngl, --gpu-layers, --n-gpu-layers N` | max. number of layers to store in VRAM, either an exact number, 'auto', or 'all' (default: auto)<br/>(env: LLAMA_ARG_N_GPU_LAYERS) |
 | `-sm, --split-mode {none,layer,row,tensor}` | how to split the model across multiple GPUs, one of:<br/>- none: use one GPU only<br/>- layer (default): split layers and KV across GPUs (pipelined)<br/>- row: split weight across GPUs by rows (parallelized)<br/>- tensor: split weights and KV across GPUs (parallelized, EXPERIMENTAL)<br/>(env: LLAMA_ARG_SPLIT_MODE) |
 | `-ts, --tensor-split N0,N1,N2,...` | fraction of the model to offload to each GPU, comma-separated list of proportions, e.g. 3,1<br/>(env: LLAMA_ARG_TENSOR_SPLIT) |
 | `-mg, --main-gpu INDEX` | the GPU to use for the model (with split-mode = none), or for intermediate results and KV (with split-mode = row) (default: 0)<br/>(env: LLAMA_ARG_MAIN_GPU) |
 | `-fit, --fit [on\|off]` | whether to adjust unset arguments to fit in device memory ('on' or 'off', default: 'on')<br/>(env: LLAMA_ARG_FIT) |
-| `-fitt, --fit-target MiB0,MiB1,MiB2,...` | target margin per device for --fit, comma-separated list of values, single value is broadcast across all devices, default: 1024<br/>(env: LLAMA_ARG_FIT_TARGET) |
+| `-fitt, --fit-target MiB0,MiB1,MiB2,...` | target margin per device for --fit, comma-separated list of values, single value is broadcast across all devices; automatic: 300 MiB headless, 800 MiB with a display or unknown display state; explicit values take priority<br/>(env: LLAMA_ARG_FIT_TARGET) |
 | `-fitc, --fit-ctx N` | minimum ctx size that can be set by --fit option, default: 4096<br/>(env: LLAMA_ARG_FIT_CTX) |
 | `--check-tensors` | check model tensor data for invalid values (default: false) |
 | `--override-kv KEY=TYPE:VALUE,...` | advanced option to override model metadata by key. to specify multiple overrides, either use comma-separated values.<br/>types: int, float, bool, str. example: --override-kv tokenizer.ggml.add_bos_token=bool:false,tokenizer.ggml.add_eos_token=bool:false |
@@ -163,12 +164,14 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `-lcd, --lookup-cache-dynamic FNAME` | path to dynamic lookup cache to use for lookup decoding (updated by generation) |
 | `--lookup-cache-dynamic-save` | write the dynamic lookup cache back to the file given by --lookup-cache-dynamic, so lookup decoding starts warm on the next run; the file then contains n-grams of the served conversations (default: false) |
 | `--lookup-cache-dynamic-save-interval N` | seconds between checkpoints of the dynamic lookup cache, written in the background, 0 = only at shutdown (default: 300) |
-| `--lookup-cache-dynamic-max-ngrams N` | maximum number of n-grams kept in the dynamic lookup cache when it is saved, the least useful ones are evicted, 0 = unlimited (default: 1000000) |
+| `--lookup-cache-dynamic-max-ngrams N` | maximum n-gram keys learned in the live dynamic lookup cache and kept when saving; full caches still update existing keys, saves evict by utility, 0 = unlimited (default: 1000000) |
 | `--kv-unified-per-slot N` | context limit per parallel slot (default: unset, behavior unchanged).<br/>when set without -c/--ctx-size, the shared KV pool is sized to n_parallel*N<br/>(env: LLAMA_ARG_KV_UNIFIED_PER_SLOT) |
 | `-ctxcp, --ctx-checkpoints, --swa-checkpoints N` | max number of context checkpoints to create per slot (default: 32)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)<br/>(env: LLAMA_ARG_CTX_CHECKPOINTS) |
 | `-cms, --checkpoint-min-step N` | minimum spacing between context checkpoints in tokens (default: 8192, 0 = no minimum)<br/>(env: LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT) |
 | `-cram, --cache-ram N` | maximum RAM size of the prompt cache in MiB (default: sized from total host RAM: <16 GB 2048, 16 GB 4096, 32 GB 8192, 64 GB 12288, 96 GB 16384, 128 GB+ 20480, at most half of the available memory at startup; -1 = half of the free host memory at startup, 0 = disable)[(more info)](https://github.com/ggml-org/llama.cpp/pull/16391)<br/>(env: LLAMA_ARG_CACHE_RAM) |
 | `--cache-disk-path PATH` | directory of the prompt-cache disk tier: entries evicted from the RAM cache (and the cache at shutdown) are written here and restored on a later cache miss or after a restart instead of re-processing the prompt; created if missing (default: $XDG_CACHE_HOME/llamampere/prompt-cache, else ~/.cache/llamampere/prompt-cache)<br/>(env: LLAMA_ARG_CACHE_DISK_PATH) |
+| `--eval-cache DIR` | folder of pre-built prompt states for prompts that are sent again and again (evals, benchmarks); build it with tools/eval-cache/llama-eval-cache.py. A prompt that starts with a stored prompt skips the prefill of that part. The folder is tied to the model file and the KV-cache settings it was built with: the server refuses to start with other settings (default: off). See [tools/eval-cache/README.md](../eval-cache/README.md)<br/>(env: LLAMA_ARG_EVAL_CACHE) |
+| `--eval-cache-build` | let requests that carry "eval_cache_save_at" write new entries to the --eval-cache folder (created if missing); used by the eval-cache builder, not needed to read a folder (default: off)<br/>(env: LLAMA_ARG_EVAL_CACHE_BUILD) |
 | `--cache-disk-limit N` | size limit of the prompt-cache disk tier in MiB; the oldest-written entries are deleted first; writes are skipped while the filesystem has less than max(10%, 8 GiB) free (default: 16384, -1 = no limit, the free-space guard still applies, 0 = disable the disk tier)<br/>(env: LLAMA_ARG_CACHE_DISK_LIMIT) |
 | `--no-cache-disk` | disable the prompt-cache disk tier (RAM cache only)<br/>(env: LLAMA_ARG_NO_CACHE_DISK) |
 | `--cache-ram-checkpoints N` | RAM prompt cache: context checkpoints (hybrid/recurrent models) kept per cached entry: the N newest plus one each time the distance from the end doubles; an edit between two kept checkpoints re-processes from the earlier one. The active slot keeps all of its checkpoints. 0 = all (default: 4)<br/>(env: LLAMA_ARG_CACHE_RAM_CHECKPOINTS) |
@@ -268,8 +271,10 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--spec-draft-override-tensor, -otd, --override-tensor-draft <tensor name pattern>=<buffer type>,...` | override tensor buffer type for draft model |
 | `--spec-draft-cpu-moe, -cmoed, --cpu-moe-draft` | keep all Mixture of Experts (MoE) weights in the CPU for the draft model<br/>(env: LLAMA_ARG_SPEC_DRAFT_CPU_MOE) |
 | `--spec-draft-n-cpu-moe, --spec-draft-ncmoe, -ncmoed, --n-cpu-moe-draft N` | keep the Mixture of Experts (MoE) weights of the first N layers in the CPU for the draft model<br/>(env: LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE) |
+| `--spec-moe-keep N` | MTP draft only: experts the router picks at rank >= N run only when they are already resident in VRAM (--moe-cache); the others are left out of the draft. The verify pass is unchanged, so the output is unchanged; only the draft acceptance can move (default: -1, off)<br/>(env: LLAMA_ARG_SPEC_MOE_KEEP) |
 | `--spec-draft-n-max N` | number of tokens to draft for speculative decoding (default: 3)<br/>(env: LLAMA_ARG_SPEC_DRAFT_N_MAX) |
 | `--spec-draft-n-min N` | minimum number of draft tokens to use for speculative decoding (default: 0)<br/>(env: LLAMA_ARG_SPEC_DRAFT_N_MIN) |
+| `--spec-draft-ubatch, -ubd, --ubatch-size-draft N` | physical batch size of an MTP draft context; the prompt pass is split into pieces of at most N tokens, which shrinks the draft's compute buffer (default: -1 = 2048 for an MTP draft loaded with -md, the main -ub otherwise; 0 = always the main -ub)<br/>(env: LLAMA_ARG_SPEC_DRAFT_UBATCH) |
 | `--spec-draft-n-min-adaptive N` | minimum adaptive MTP draft depth; the depth starts here and never drops below it (default: 3)<br/>(env: LLAMA_ARG_SPEC_DRAFT_N_MIN_ADAPTIVE) |
 | `--spec-chain 0\|1\|N` | chained MTP drafting: all draft tokens in one GPU decode (default: off). Use --spec-chain N to enable and set depth (e.g. --spec-chain 8).<br/>(env: LLAMA_ARG_SPEC_CHAIN) |
 | `--spec-synth-len L` | target mean synthetic acceptance length, including the target token (benchmarking only)<br/>(env: LLAMA_ARG_SPEC_SYNTH_LEN) |
@@ -360,7 +365,7 @@ When `--spec-type` is not given, the server looks up the model family in a small
 - The server logs one line when the default applies, e.g. `speculative: MTP drafter on by default for qwen35 (nextn=1): draft-mtp-adaptive, n-max 4, n-min-adaptive 3, p-min 0, vocab map auto; --spec-type none disables`.
 - `--spec-default` is not this default. It is the upstream n-gram preset (`--spec-type ngram-mod` with `--spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64`) and, like any explicit `--spec-type`, it replaces the MTP drafter default rather than adding to it.
 - To run without speculative decoding, pass `--spec-type none` (or set `LLAMA_ARG_SPEC_TYPE=none`). `--spec-draft-n-max 0` also keeps the default from applying.
-- The same default applies to `llama-cli`, which runs the server in-process. Other tools (`llama-perplexity`, `llama-bench`, `llama-kld-depth`, ...) are unaffected.
+- The same default applies to `llama-cli`, which runs the server in-process. Other tools (`llama-perplexity`, `llama-bench`, ...) are unaffected.
 
 ### Multimodal support
 
@@ -2388,3 +2393,11 @@ You can specify default preferences for the web UI using `--ui-config <JSON conf
 > **Note:** The old flags `--webui-config` and `--webui-config-file` are deprecated but still work as aliases.
 
 You may find available preferences in [settings-keys.ts](../ui/src/lib/constants/settings-keys.ts).
+
+### Repeated output stopping
+
+The server checks generated tokens for back-to-back repeating units of 1 to 64 tokens. It stops when a unit reaches `--loop-guard-reps` repeats (default 100), or the repeating stretch reaches `--loop-guard-span` tokens (default 400) with at least four repeats. A token-only detector cannot distinguish all intentional repetition from a model loop.
+
+For bulk repetitive data, send `loop_guard: false` or start with `--loop-guard-reps 0` to disable both rules. Intentional stops include 4,096-zero JSON/C arrays, 1,000 identical Markdown table rows, and base64 of a zero-filled page. Requests can override the repeat count with `loop_guard_reps`. The span limit remains the server setting.
+
+A loop stop preserves the text already generated and returns `stopped_loop: true`, `loop_period`, and `loop_repeats` in the final response and its timings. Native completions use `stop_type: "loop"` and `finish_reason: "stop"`; OpenAI completions use `finish_reason: "stop"`. The guard only sees accepted output tokens, including accepted speculative tokens, and starts fresh for each request. Prompt tokens are not counted.

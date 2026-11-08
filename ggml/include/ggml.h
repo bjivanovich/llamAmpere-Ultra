@@ -452,6 +452,33 @@ extern "C" {
         GGML_TYPE_EXL3_8  = 57,
         GGML_TYPE_TQ6_0   = 58, // TurboQuant 6-bit KV cache: WHT + 6-bit PolarQuant (runtime-only KV type)
         GGML_TYPE_TQ5_0   = 59, // TurboQuant 5-bit KV cache: WHT + 5-bit PolarQuant (runtime-only KV type)
+        // AI+ tile layout (AITk, k = 2/3/4; ggml/src/ggml-ait.h): the 1MAD 16-bit trellis in IMMA-fragment tiles of
+        // 32 rows x 8 K, chunks of 32 rows x 512 K = [2048k trellis bytes][16 fp16 row scales][16 fp16 col scales],
+        // model w' = level * rs[row][K/1024] * cs[K] / 64 in the AI+ H256 rotated basis. blck 512, 64k + 2 bytes per row
+        // and 512 K (k + 0.03125 bpw). Whole-tensor type (to_float NULL): M % 32 == 0, M >= 1024, K % 1024 == 0, CUDA only.
+        GGML_TYPE_AIT2    = 110,
+        GGML_TYPE_AIT3    = 111,
+        GGML_TYPE_AIT4    = 112,
+        // AIT2P: AIT2 bytes (k = 2) with the pair-table level map (20-bit window per weight pair -> 1024 x 2 int8 table)
+        GGML_TYPE_AIT2P   = 113,
+        // AI+ unit layout (AITk_U, k = 2..5): 16 rows x 128 K units = [fp16 d[16]][16 tiles of 16k bytes], 32 + 256k bytes
+        // per unit (k + 0.125 bpw), any K % 128 == 0 (expert stacks too), H256 rotation when K % 256 == 0 else H128.
+        // Decoder constants by rate: 0xC3CCD12D (k = 2), 0x87D8D12D (k = 3), 0xAA73876B (k = 4 / 5).
+        GGML_TYPE_AIT5_U  = 114,
+        GGML_TYPE_AIT2_U  = 115,
+        GGML_TYPE_AIT3_U  = 116,
+        GGML_TYPE_AIT4_U  = 117,
+        GGML_TYPE_AIT2P_U = 121, // AIT2_U bytes and units, AIT2P pair-table level map (ggml-ai4.h)
+        // Fractional computed pair: 5 bits per two weights + fp16/128 scale = 2.625 bpw.
+        // Whole-tensor 16-row units; CUDA dense matmul only. No row-wise embedding lookup.
+        GGML_TYPE_AIF25_U = 118,
+        // AITk_U2 (k = 2/3/4), expert unit layout v2: same 128-weight tiles, constants and level rule as AITk_U, but ONE fp16
+        // scale per row per 640 K (block = 16 rows x 640 K = [16 fp16 scales][5 chunks x 16 tiles x 16k bytes], 80k + 2 bytes
+        // per row and block, k + 0.025 bpw instead of k + 0.125). K % 640 == 0 (Flash-Next experts 2560 / 640). k = 2/3 are
+        // ggml_ai4_is_unit types with CUDA kernels; k = 4 (124) is registered only (no kernel, ggml_ai4_rate 0).
+        GGML_TYPE_AIT2_U2 = 122,
+        GGML_TYPE_AIT3_U2 = 123,
+        GGML_TYPE_AIT4_U2 = 124,
         GGML_TYPE_PQ2_0   = 142, // Prism group-128 ternary weights
         GGML_TYPE_PTQ1_0  = 143, // Prism packed group-128 ternary weights
         GGML_TYPE_TQ2_T   = 144,
@@ -628,6 +655,8 @@ extern "C" {
         GGML_OP_DSV4_HC_COMB,
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
+        GGML_OP_DSV4_HC_DOWN,
+        GGML_OP_DSV4_HC_UP,
 
         GGML_OP_UNARY,
 
@@ -818,6 +847,24 @@ extern "C" {
     GGML_API size_t  ggml_element_size(const struct ggml_tensor * tensor);
 
     GGML_API bool    ggml_is_quantized(enum ggml_type type);
+    // AI+ unit types (ggml-ai4.h): trellis rate k for GGML_TYPE_AIT2_U..AIT5_U, 0 otherwise. ggml_ai4_is_unit: the
+    // unit-128 layout. ggml_ai4_layout: 1 = unit-128, -1 = not an AI+ unit type. ggml_ai4_trellis_mul /
+    // ggml_ai4_scale_mul: the type's decoder constant and the encoder's scale-seed multiplier (0 for other types).
+    GGML_API int      ggml_ai4_rate       (enum ggml_type type);
+    // AI+ tile layout: trellis rate k for GGML_TYPE_AIT2..AIT4, 0 otherwise (ggml_ai4_rate is 0 for these types)
+    GGML_API int      ggml_ait_rate       (enum ggml_type type);
+    // AI+ level code: 0 = 1MAD (AIT2/3/4), 1 = pair table (AIT2P); -1 for non-AIT types
+    GGML_API int      ggml_ait_code       (enum ggml_type type);
+    GGML_API bool     ggml_ai4_is_unit    (enum ggml_type type);
+    GGML_API int      ggml_ai4_layout     (enum ggml_type type);
+    GGML_API uint32_t ggml_ai4_trellis_mul(enum ggml_type type);
+    // AI+ unit level map: 0 = 1MAD (trellis_mul), 1 = AIT2P pair table (GGML_TYPE_AIT2P_U, trellis_mul 0), -1 = not a unit type
+    GGML_API int      ggml_ai4_code       (enum ggml_type type);
+    GGML_API float    ggml_ai4_scale_mul  (enum ggml_type type);
+    // AITk_U2 expert layout v2: trellis rate k for GGML_TYPE_AIT2_U2..AIT4_U2, 0 otherwise (decoder constants = those of the AITk_U type)
+    GGML_API int      ggml_ai4v2_rate     (enum ggml_type type);
+    GGML_API uint32_t ggml_ai4v2_trellis_mul(enum ggml_type type);
+
     GGML_API int     ggml_exl3_bits   (enum ggml_type type); // bits/weight for GGML_TYPE_EXL3_*, 0 otherwise
     // EXL3 reference decode of trellis rows 16*g .. 16*g+15 of a [K, N] EXL3 tensor (bits 2..8) into y[16][K]
     // (row-major, y[col*K + k]); the rows stay in the trellis domain (suh/svh and both Hadamards not applied)
@@ -2546,11 +2593,21 @@ extern "C" {
     // mask: [n_kv,     n_batch, ne32,      ne33]
     // res:  [n_embd_v, n_head,  n_batch,   ne3 ] !! permuted !!
     //
+    // packed mask: an I32 mask of shape [ceil(n_kv/32), n_batch, ne32, ne33] holds one bit per KV position,
+    // bit (i % 32) of word i/32 of a row: 1 = visible (mask value 0), 0 = masked (-INF). It replaces the
+    // n_kv x n_batch F16 mask when the mask is binary (no ALiBi, max_bias == 0); see ggml_flash_attn_ext_mask_packed.
+    //
     // broadcast:
     //   n_head % n_head_kv == 0
     //   n_head % ne32      == 0
     //   ne3    % ne33      == 0
     //
+    // CPU also accepts I64 [1, n_batch, 1, ne33] visible-prefix lengths: KV index < L_j is visible.
+    // Prefix masks require max_bias == 0; unsupported backends must reject the operation.
+    //
+    // true when the mask of a FLASH_ATTN_EXT node is the one-bit packed mask (see above)
+    GGML_API bool ggml_flash_attn_ext_mask_packed(const struct ggml_tensor * mask);
+
     GGML_API struct ggml_tensor * ggml_flash_attn_ext(
             struct ggml_context * ctx,
             struct ggml_tensor  * q,
@@ -2782,6 +2839,19 @@ extern "C" {
             int64_t               K,
             int32_t               emit_mode);
 
+    // emit_mode 1 or 2 only: before its n_tokens, `gdn` runs w->ne[0] prefix tokens read from `ring`,
+    // [n_rows, n_seqs] rows of packed ingredient slots in the layout of emit_mode `ring_mode` (slot j
+    // of seq s at row s, offset j * ingr_width * H, as this op emits them), with g and beta
+    // multiplied by w[j]. A prefix token only advances the state: no attention output, no slot,
+    // and it does not count towards the checkpoint block. w[j] == 0 leaves the state bit-exact,
+    // so a masked ring prefix replays the accepted slots ahead of the batch in the same call.
+    // With n_tokens <= K the output gains the checkpoint block: the state after the prefix.
+    GGML_API void ggml_gated_delta_net_set_prefix(
+            struct ggml_tensor  * gdn,
+            struct ggml_tensor  * ring,
+            struct ggml_tensor  * w,
+            int32_t               ring_mode);
+
     // ggml_gated_delta_net emit_mode 1 and 2: floats per head in one ingredient slot (g_width = g->ne[0])
     GGML_API int64_t ggml_gated_delta_net_ingr_width(int64_t S_v, int64_t g_width, int32_t emit_mode);
 
@@ -2911,6 +2981,36 @@ extern "C" {
             struct ggml_tensor  * residual,
             struct ggml_tensor  * post,
             struct ggml_tensor  * comb);
+
+    // [HCFUSED] Flash-Next hyper-connection mix in two ops (LLAMA_HC_FUSED=1 in the model, default off).
+    // Same math as rms_norm(x)*w_norm -> W_down -> scale -> silu -> W_up -> gated mean, plus the W_inject scatter
+    // weights, with the per-stream norm folded into the down pass and the gate folded into the up pass.
+    //
+    // hc_down: x [n_embd, hc, T] f32, w_norm [n_embd, hc] f32, w_down [hc*n_embd, R] bf16,
+    //          w_inject [hc*n_embd, hc] bf16 or NULL  ->  1-D f32 of (R + hc_inj + hc)*T, hc_inj = w_inject ? hc : 0
+    //   xn[s*n_embd + i, t] = x[i, s, t] * r[s, t] * w_norm[i, s],  r[s, t] = 1/sqrt(mean_i x[i, s, t]^2 + eps)
+    //   segment 0, [R, T]:      act[k, t] = silu(lo_scale * sum_j w_down[j, k] * xn[j, t])
+    //   segment 1, [hc_inj, T]: inj[h, t] = 2*sigmoid(inj_scale * sum_j w_inject[j, h] * xn[j, t])
+    //   segment 2, [hc, T]:     r[s, t]
+    GGML_API struct ggml_tensor * ggml_dsv4_hc_down(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * w_norm,
+            struct ggml_tensor  * w_down,
+            struct ggml_tensor  * w_inject,
+            float                 eps,
+            float                 lo_scale,
+            float                 inj_scale);
+
+    // hc_up: x, w_norm as above, down = the hc_down result, w_up [R, hc*n_embd] bf16 -> [n_embd, T] f32
+    //   result[i, t] = out_scale * sum_s xn[s*n_embd + i, t] * sigmoid(sum_k w_up[k, s*n_embd + i] * act[k, t])
+    GGML_API struct ggml_tensor * ggml_dsv4_hc_up(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * w_norm,
+            struct ggml_tensor  * down,
+            struct ggml_tensor  * w_up,
+            float                 out_scale);
 
     // custom operators
 
@@ -3202,6 +3302,35 @@ extern "C" {
     GGML_API struct ggml_threadpool_params ggml_threadpool_params_default(int n_threads);
     GGML_API void                          ggml_threadpool_params_init   (struct ggml_threadpool_params * p, int n_threads);
     GGML_API bool                          ggml_threadpool_params_match  (const struct ggml_threadpool_params * p0, const struct ggml_threadpool_params * p1);
+
+    // MoE always-resident expert bank: per regular expert tensor (keyed by its data pointer), which experts are also
+    // held in an always-on-device bank. The regular call leaves those rows out and the expert cache never plans them.
+    // in_bank may be NULL (tensor registered for the resident census only). Registration happens at model load,
+    // before any compute; n_expert must be <= 512.
+    GGML_API void            ggml_moe_bank_register  (const void * weight_data, int32_t layer, int32_t n_expert, const uint8_t * in_bank);
+    GGML_API void            ggml_moe_bank_unregister(const void * weight_data);
+    // true once some registered tensor has bank experts (a model with hot-bank tensors is loaded)
+    GGML_API bool            ggml_moe_bank_any       (void);
+    // fork AIPFIX ONEPATH: true while the CUDA expert cache's device tables carry the bank rows of every banked tensor
+    // (the one path computes bank routes from them); false before the tables exist, when they were refused, or after
+    GGML_API void            ggml_moe_bank_onepath_set_live(bool live);
+    GGML_API bool            ggml_moe_bank_onepath_live    (void);
+    // flags of a registered tensor with a bank, NULL otherwise or when GGML_MOE_BANK_SKIP=0
+    GGML_API const uint8_t * ggml_moe_bank_lookup    (const void * weight_data);
+    // fork AIPFIX ONEPATH: where the bank rows of a registered tensor's bank experts live (the bank tensor's data,
+    // type and expert stride; slot[e] = bank row of expert e or -1). Call after ggml_moe_bank_register. ggml_moe_bank_rows
+    // is false for a tensor without them (or without a bank, or with GGML_MOE_BANK_SKIP=0).
+    GGML_API void            ggml_moe_bank_register_rows(const void * weight_data, const void * bank_data, int32_t bank_type,
+                                                         size_t bank_nb2, const int32_t * slot);
+    GGML_API bool            ggml_moe_bank_rows      (const void * weight_data, const void ** bank_data, int32_t * bank_type,
+                                                      size_t * bank_nb2, const int16_t ** slot);
+    // enumerate every registered tensor (ignores GGML_MOE_BANK_SKIP); returns false past the end
+    GGML_API bool            ggml_moe_bank_entry     (int index, const void ** weight_data, int32_t * layer, int32_t * n_expert, const uint8_t ** in_bank);
+    // resident census over the registered layers: an expert counts once, as bank when it is in the bank, else as cache
+    // when every registered tensor of its layer has it resident (resident() decides). both = cache copies of bank
+    // experts. Returns false when nothing is registered.
+    GGML_API bool            ggml_moe_bank_census    (bool (*resident)(void * user, const void * weight_data, int32_t expert), void * user,
+                                                      int32_t * layer_min, int32_t * layer_max, size_t * cache, size_t * bank, size_t * both);
 
 #ifdef  __cplusplus
 }

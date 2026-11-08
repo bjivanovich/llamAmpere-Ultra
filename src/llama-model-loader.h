@@ -6,6 +6,7 @@
 #include "llama-arch.h"
 #include "llama-hparams.h"
 #include "llama-mmap.h"
+#include "llama-moe-arena.h"
 
 #include "ggml-cpp.h"
 
@@ -83,6 +84,13 @@ struct llama_model_loader {
     bool check_tensors;
     bool no_alloc;
     bool load_mtp;
+    bool use_moe_arena = false;
+    uint32_t moe_arena_layers = 0;
+    // fork: per-tensor answer to "is every F32 router value exactly BF16-representable" (low 16 bits zero)
+    mutable std::unordered_map<std::string, bool> router_bf16_exact;
+    bool router_bf16_exact_check(const char * name) const;
+    std::set<const ggml_tensor *> arena_tensors;
+    std::unique_ptr<llama_moe_arena> load_moe_arena(llama_progress_callback callback, void * user_data, bool fit_ram = false);
 
     // handle TENSOR_READ_LAZY
     // use case: keep PLE / engrams embd tensors on disk, read them on demand
@@ -122,6 +130,7 @@ struct llama_model_loader {
     llama_fver  fver;
 
     llama_mmaps mappings;
+    size_t prefetch_remaining = SIZE_MAX;
 
     std::map<std::string, llama_tensor_weight, weight_name_comparer> weights_map;
     std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
@@ -139,6 +148,7 @@ struct llama_model_loader {
     size_t size_done = 0;
     size_t size_data = 0;
     std::vector<std::pair<size_t, size_t>> mmaps_used;
+    int overlay_idx = -1; // LLAMA_MODEL_OVERLAY file index; its page cache is dropped once loaded
 
     // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
     struct ggml_backend_buft_comparator {
@@ -166,6 +176,7 @@ struct llama_model_loader {
 
     // track tensors that had to be moved for debugging:
     size_t n_tensors_moved = 0;
+    size_t n_offload_repack_skipped = 0; // #201: CPU-overridden weights on GPU layers kept in host layout
     std::string first_tensor_moved_name;
     std::string first_tensor_moved_type_name;
     ggml_backend_buffer_type_t first_moved_from_buft = nullptr;
@@ -238,9 +249,11 @@ struct llama_model_loader {
         const llama_hparams & hparams, const buft_list_t * buft_list_cpu, const buft_list_t * buft_list_input, const buft_list_t * buft_list_output,
         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);
 
+    bool try_borrow_tensor(const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, ggml_tensor * donor);
+
     void done_getting_tensors(bool partial = false) const;
 
-    void init_mappings(bool prefetch = true, llama_mlocks * mlock_mmaps = nullptr);
+    void init_mappings(bool prefetch = true, llama_mlocks * mlock_mmaps = nullptr, bool private_dense = false, bool fit_ram = false);
 
     void get_mapping_range(size_t * first, size_t * last, void ** addr, int idx, ggml_context * ctx) const;
 

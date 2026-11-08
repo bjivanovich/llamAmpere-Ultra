@@ -5,9 +5,11 @@
 #include "speculative.h"
 #include "spec-defaults.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -143,6 +145,18 @@ static void test(void) {
 #endif
 
     printf("test-arg-parser: make sure there is no duplicated arguments in any examples\n\n");
+    {
+        const auto ctx = common_params_parser_init(params, LLAMA_EXAMPLE_SERVER);
+        bool found = false;
+        for (const auto & opt : ctx.options) {
+            if (std::find(opt.args.begin(), opt.args.end(), std::string("--moe-skip-tail")) != opt.args.end()) {
+                assert(opt.help.empty());
+                assert(opt.env && std::string(opt.env) == "LLAMA_ARG_MOE_SKIP_TAIL");
+                found = true;
+            }
+        }
+        assert(found);
+    }
     for (int ex = 0; ex < LLAMA_EXAMPLE_COUNT; ex++) {
         try {
             auto ctx_arg = common_params_parser_init(params, (enum llama_example)ex);
@@ -214,6 +228,171 @@ static void test(void) {
     std::vector<std::string> argv;
 
     printf("test-arg-parser: test invalid usage\n\n");
+
+    {
+        // --moe-skip-tail: 0..9, default 0 (exact)
+        common_params defaults;
+        assert(defaults.moe_cache.skip_tail == 0);
+        std::vector<std::string> args_skip = {"binary_name", "--moe-skip-tail", "7"};
+        common_params skip;
+        assert(common_params_parse(args_skip.size(), list_str_to_char(args_skip).data(), skip, LLAMA_EXAMPLE_SERVER));
+        assert(skip.moe_cache.skip_tail == 7);
+        assert(common_context_params_to_llama(skip).moe_skip_tail == 7);
+        for (const char * value : {"10", "-1", "x"}) {
+            args_skip = {"binary_name", "--moe-skip-tail", value};
+            common_params invalid;
+            assert(!common_params_parse(args_skip.size(), list_str_to_char(args_skip).data(), invalid, LLAMA_EXAMPLE_SERVER));
+        }
+        assert(llama_context_default_params().moe_skip_tail == 0);
+    }
+
+    {
+        // The budget has its own enable; no implicit route-rank cutoff.
+        common_params defaults;
+        assert(defaults.moe_cache.skip_budget == 0.0f);
+        assert(defaults.moe_cache.skip_rank_floor == -1);
+        unsetenv("GGML_MOE_SKIP_RANK_FLOOR");
+        unsetenv("GGML_MOE_SKIP_POLICY");
+        unsetenv("GGML_MOE_SKIP_THRESHOLD");
+        assert(common_context_params_to_llama(defaults).moe_skip_tail == 0);
+        assert(!common_context_params_to_llama(defaults).moe_skip_mass);
+        assert(getenv("GGML_MOE_SKIP_POLICY") == nullptr);
+        assert(getenv("GGML_MOE_SKIP_RANK_FLOOR") == nullptr);
+        std::vector<std::string> args_budget = {"binary_name", "--moe-skip-budget", "0.2"};
+        common_params budget;
+        assert(common_params_parse(args_budget.size(), list_str_to_char(args_budget).data(), budget, LLAMA_EXAMPLE_SERVER));
+        assert(budget.moe_cache.skip_budget == 0.2f);
+        assert(common_context_params_to_llama(budget).moe_skip_tail == 0);
+        assert(common_context_params_to_llama(budget).moe_skip_mass);
+        assert(std::string(getenv("GGML_MOE_SKIP_POLICY")) == "cumulative");
+        assert(std::string(getenv("GGML_MOE_SKIP_THRESHOLD")) == "0.2");
+        args_budget = {"binary_name", "--moe-skip-budget", "0.15", "--moe-skip-tail", "8"};
+        common_params with_tail;
+        assert(common_params_parse(args_budget.size(), list_str_to_char(args_budget).data(), with_tail, LLAMA_EXAMPLE_SERVER));
+        assert(common_context_params_to_llama(with_tail).moe_skip_tail == 8);
+        assert(common_context_params_to_llama(with_tail).moe_skip_mass);
+        assert(std::string(getenv("GGML_MOE_SKIP_THRESHOLD")) == "0.15");
+        for (const char * value : {"0", "1", "5", "10"}) {
+            args_budget = {"binary_name", "--moe-skip-budget", "0.15", "--moe-skip-rank-floor", value};
+            common_params floor;
+            assert(common_params_parse(args_budget.size(), list_str_to_char(args_budget).data(), floor, LLAMA_EXAMPLE_SERVER));
+            assert(floor.moe_cache.skip_rank_floor == std::stoi(value));
+            assert(common_context_params_to_llama(floor).moe_skip_tail == 0);
+            assert(common_context_params_to_llama(floor).moe_skip_mass);
+            assert(std::string(getenv("GGML_MOE_SKIP_RANK_FLOOR")) == value);
+        }
+        for (const char * value : {"-1", "11", "x"}) {
+            args_budget = {"binary_name", "--moe-skip-rank-floor", value};
+            common_params invalid;
+            assert(!common_params_parse(args_budget.size(), list_str_to_char(args_budget).data(), invalid, LLAMA_EXAMPLE_SERVER));
+        }
+        for (bool tail_first : {false, true}) {
+            args_budget = tail_first ? std::vector<std::string>{"binary_name", "--moe-skip-tail", "0", "--moe-skip-budget", "0.15"}
+                                     : std::vector<std::string>{"binary_name", "--moe-skip-budget", "0.15", "--moe-skip-tail", "0"};
+            common_params exact;
+            assert(common_params_parse(args_budget.size(), list_str_to_char(args_budget).data(), exact, LLAMA_EXAMPLE_SERVER));
+            assert(common_context_params_to_llama(exact).moe_skip_tail == 0);
+            assert(common_context_params_to_llama(exact).moe_skip_mass);
+        }
+        unsetenv("GGML_MOE_SKIP_RANK_FLOOR");
+        setenv("GGML_MOE_SKIP_POLICY", "threshold", 1);
+        bool threw = false;
+        try { common_context_params_to_llama(budget); } catch (const std::invalid_argument &) { threw = true; }
+        assert(threw);
+        unsetenv("GGML_MOE_SKIP_POLICY");
+        unsetenv("GGML_MOE_SKIP_THRESHOLD");
+        for (const char * value : {"0.3", "-0.1", "x", "0.2x", "nan"}) {
+            args_budget = {"binary_name", "--moe-skip-budget", value};
+            common_params invalid;
+            assert(!common_params_parse(args_budget.size(), list_str_to_char(args_budget).data(), invalid, LLAMA_EXAMPLE_SERVER));
+        }
+    }
+
+    {
+        auto parse_skip = [&](std::vector<std::string> args) {
+            common_params parsed;
+            assert(common_params_parse(args.size(), list_str_to_char(args).data(), parsed, LLAMA_EXAMPLE_SERVER));
+            return parsed;
+        };
+        auto preset = parse_skip({"binary_name", "--moe-skip"});
+        assert(preset.moe_cache.skip_tail == 0);
+        assert(preset.moe_cache.skip_budget == 0.15f && preset.moe_cache.skip_rank_floor == 5);
+        assert(common_context_params_to_llama(preset).moe_skip_mass);
+        // Omitted value must not eat the next option; mapping is used by presets too.
+        auto next = parse_skip({"binary_name", "--moe-skip", "--ctx-size", "4096"});
+        assert(next.n_ctx == 4096 && next.moe_cache.skip_budget == 0.15f);
+        std::vector<std::string> args = {"binary_name", "--moe-skip", "--ctx-size", "4096"};
+        std::map<common_arg, std::string> mapped;
+        assert(common_params_to_map(args.size(), list_str_to_char(args).data(), LLAMA_EXAMPLE_SERVER, mapped));
+        for (const auto & entry : mapped) {
+            if (std::string(entry.first.args.front()) == "--moe-skip") { assert(entry.second == "on"); }
+        }
+        for (const char * name : {"--moe-skip-budget", "--moe-skip-rank-floor", "--moe-skip-tail"}) {
+            const std::string value = std::string(name) == "--moe-skip-budget" ? "0.1" : "8";
+            for (bool first : {false, true}) {
+                auto overridden = parse_skip(first ? std::vector<std::string>{"binary_name", name, value, "--moe-skip"}
+                                                   : std::vector<std::string>{"binary_name", "--moe-skip", name, value});
+                assert(overridden.moe_cache.skip_budget == (std::string(name) == "--moe-skip-budget" ? 0.1f : 0.15f));
+                assert(overridden.moe_cache.skip_rank_floor == (std::string(name) == "--moe-skip-rank-floor" ? 8 : 5));
+                assert(overridden.moe_cache.skip_tail == (std::string(name) == "--moe-skip-tail" ? 8 : 0));
+            }
+        }
+        // An explicit zero budget overrides the preset too.
+        for (bool first : {false, true}) {
+            auto zero = parse_skip(first ? std::vector<std::string>{"binary_name", "--moe-skip-budget", "0", "--moe-skip"}
+                                         : std::vector<std::string>{"binary_name", "--moe-skip", "--moe-skip-budget", "0"});
+            assert(!common_context_params_to_llama(zero).moe_skip_mass);
+        }
+        auto off = parse_skip({"binary_name", "--moe-skip", "off"});
+        assert(off.moe_cache.skip_budget == 0 && off.moe_cache.skip_rank_floor == 0);
+        assert(!common_context_params_to_llama(off).moe_skip_mass && off.moe_cache.skip_tail == 0);
+        auto legacy_off = parse_skip({"binary_name", "--moe-skip-tail", "7", "--moe-skip", "off"});
+        assert(legacy_off.moe_cache.skip_tail == 0);
+        setenv("LLAMA_ARG_MOE_SKIP", "on", 1);
+        assert(parse_skip({"binary_name"}).moe_cache.skip_budget == 0.15f);
+        assert(parse_skip({"binary_name", "--moe-skip", "off"}).moe_cache.skip_budget == 0);
+        setenv("LLAMA_ARG_MOE_SKIP", "off", 1);
+        assert(parse_skip({"binary_name"}).moe_cache.skip_budget == 0);
+        assert(parse_skip({"binary_name", "--moe-skip"}).moe_cache.skip_budget == 0.15f);
+        unsetenv("LLAMA_ARG_MOE_SKIP");
+        args = {"binary_name", "--moe-skip", "bad"};
+        common_params invalid;
+        assert(!common_params_parse(args.size(), list_str_to_char(args).data(), invalid, LLAMA_EXAMPLE_SERVER));
+        unsetenv("GGML_MOE_SKIP_POLICY");
+        unsetenv("GGML_MOE_SKIP_THRESHOLD");
+        unsetenv("GGML_MOE_SKIP_RANK_FLOOR");
+    }
+
+#ifndef _WIN32
+    {
+        const char * prev = getenv("LLAMA_MOE_CPU_SHARE");
+        const bool had_prev = prev != nullptr;
+        const std::string saved = prev ? prev : "";
+        auto parse_share = [&list_str_to_char](std::vector<std::string> args) {
+            common_params p;
+            return common_params_parse(args.size(), list_str_to_char(args).data(), p, LLAMA_EXAMPLE_SERVER);
+        };
+        unsetenv("LLAMA_MOE_CPU_SHARE");
+        assert(parse_share({"binary_name"}));
+        assert(getenv("LLAMA_MOE_CPU_SHARE") == nullptr);
+        for (const char * value : {"0", "0.6", "0.8", "1"}) {
+            assert(parse_share({"binary_name", "--moe-cpu-share", value}));
+            assert(std::string(getenv("LLAMA_MOE_CPU_SHARE")) == value);
+        }
+        setenv("LLAMA_MOE_CPU_SHARE", "0.8", 1);
+        assert(parse_share({"binary_name"}));
+        assert(parse_share({"binary_name", "--moe-cpu-share", "0.6"}));
+        assert(std::string(getenv("LLAMA_MOE_CPU_SHARE")) == "0.6");
+        for (const char * value : {"-0.1", "1.1", "nan", "inf", "0.6junk", ""}) {
+            unsetenv("LLAMA_MOE_CPU_SHARE");
+            assert(!parse_share({"binary_name", "--moe-cpu-share", value}));
+            setenv("LLAMA_MOE_CPU_SHARE", value, 1);
+            if (*value) { assert(!parse_share({"binary_name"})); }
+        }
+        if (had_prev) { setenv("LLAMA_MOE_CPU_SHARE", saved.c_str(), 1); }
+        else { unsetenv("LLAMA_MOE_CPU_SHARE"); }
+    }
+#endif
 
     // missing value
     argv = {"binary_name", "-m"};
@@ -376,6 +555,22 @@ static void test(void) {
     assert(spec_defaults.speculative.draft.n_max == 3);
     assert(spec_defaults.speculative.draft.n_min_adaptive == 3);
 
+    for (const std::string type : {"draft-mtp", "draft-mtp-adaptive"}) {
+        for (const std::string mode : {"default", "--spec-mb-mtp", "--no-spec-mb-mtp"}) {
+            argv = {"binary_name", "--spec-type", type};
+            if (mode != "default") { argv.push_back(mode); }
+            common_params mb;
+            assert(common_params_parse(argv.size(), list_str_to_char(argv).data(), mb, LLAMA_EXAMPLE_SERVER));
+            const bool enabled = mode != "--no-spec-mb-mtp";
+            assert(mb.sampling.spec_lossy == enabled);
+            assert(mb.speculative.draft.n_max == (enabled ? 5 : 3));
+            argv.insert(argv.end(), {"--spec-draft-n-max", "4"});
+            common_params explicit_depth;
+            assert(common_params_parse(argv.size(), list_str_to_char(argv).data(), explicit_depth, LLAMA_EXAMPLE_SERVER));
+            assert(explicit_depth.speculative.draft.n_max == 4);
+        }
+    }
+
     // MTP drafter attention window: off by default, the default context params carry no window,
     // and the cparams helper leaves them untouched when the flags are absent
     assert(spec_defaults.speculative.draft.attn_window == 0);
@@ -502,7 +697,7 @@ static void test(void) {
         assert(draft.cache_type_k == GGML_TYPE_Q8_0);
         assert(draft.cache_type_v == COMMON_SJKVARN_MTP_DRAFT_KV[1]);
     }
-    // a separate draft model keeps the plain cache the SJ-KVaRN trunk flags leave behind
+    // a separate draft model with no MTP type keeps the plain cache the SJ-KVaRN trunk flags leave behind
     argv = {"binary_name", "-m", "model_file.gguf", "-md", "draft.gguf", "-ctk", "sjkvarn4", "-ctv", "sjkvarn4"};
     common_params dkv_sj_kvarn_md;
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), dkv_sj_kvarn_md, LLAMA_EXAMPLE_SPECULATIVE));
@@ -510,6 +705,52 @@ static void test(void) {
         const auto draft = common_base_params_to_speculative(dkv_sj_kvarn_md);
         assert(draft.cache_type_k == dkv_sj_kvarn_md.cache_type_k);
         assert(draft.cache_type_v == dkv_sj_kvarn_md.cache_type_v);
+        assert(!draft.speculative.draft.cache_type_sj_kvarn_default);
+    }
+    // a separate-file MTP head (ctx_type MTP) is an MTP drafter: unset types take tq5_0/turbo4
+    argv = {"binary_name", "-m", "model_file.gguf", "-md", "draft.gguf", "--spec-type", "draft-mtp-adaptive",
+            "-ctk", "sjkvarn4", "-ctv", "sjkvarn4"};
+    common_params dkv_sj_kvarn_md_mtp;
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), dkv_sj_kvarn_md_mtp, LLAMA_EXAMPLE_SERVER));
+    {
+        const auto draft = common_base_params_to_speculative(dkv_sj_kvarn_md_mtp);
+        assert(draft.cache_type_k == COMMON_SJKVARN_MTP_DRAFT_KV[0]);
+        assert(draft.cache_type_v == COMMON_SJKVARN_MTP_DRAFT_KV[1]);
+        assert(draft.speculative.draft.cache_type_sj_kvarn_default);
+        assert(draft.sj_kvarn_bits_k == 0 && draft.sj_kvarn_bits_v == 0);
+    }
+    // explicit f16 still wins on that separate MTP file
+    argv = {"binary_name", "-m", "model_file.gguf", "-md", "draft.gguf", "--spec-type", "draft-mtp-adaptive",
+            "-ctk", "sjkvarn4", "-ctv", "sjkvarn4", "-ctkd", "f16", "-ctvd", "f16"};
+    common_params dkv_sj_kvarn_md_mtp_f16;
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), dkv_sj_kvarn_md_mtp_f16, LLAMA_EXAMPLE_SERVER));
+    {
+        const auto draft = common_base_params_to_speculative(dkv_sj_kvarn_md_mtp_f16);
+        assert(draft.cache_type_k == GGML_TYPE_F16);
+        assert(draft.cache_type_v == GGML_TYPE_F16);
+        assert(!draft.speculative.draft.cache_type_sj_kvarn_default);
+    }
+    // EAGLE3 is a separate draft but not MTP, so it keeps the plain SJ-KVaRN cache
+    argv = {"binary_name", "-m", "model_file.gguf", "-md", "draft.gguf", "--spec-type", "draft-eagle3",
+            "-ctk", "sjkvarn4", "-ctv", "sjkvarn4"};
+    common_params dkv_sj_kvarn_eagle;
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), dkv_sj_kvarn_eagle, LLAMA_EXAMPLE_SERVER));
+    {
+        const auto draft = common_base_params_to_speculative(dkv_sj_kvarn_eagle);
+        assert(draft.cache_type_k == dkv_sj_kvarn_eagle.cache_type_k);
+        assert(draft.cache_type_v == dkv_sj_kvarn_eagle.cache_type_v);
+        assert(draft.cache_type_k == GGML_TYPE_F16);
+        assert(!draft.speculative.draft.cache_type_sj_kvarn_default);
+    }
+    // a quantized trunk stays quantized for a separate MTP file; it is not left at f16
+    argv = {"binary_name", "-m", "model_file.gguf", "-md", "draft.gguf", "--spec-type", "draft-mtp",
+            "-ctk", "q8_0", "-ctv", "q8_0"};
+    common_params dkv_q8_md_mtp;
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), dkv_q8_md_mtp, LLAMA_EXAMPLE_SERVER));
+    {
+        const auto draft = common_base_params_to_speculative(dkv_q8_md_mtp);
+        assert(draft.cache_type_k == GGML_TYPE_Q8_0);
+        assert(draft.cache_type_v == GGML_TYPE_Q8_0);
         assert(!draft.speculative.draft.cache_type_sj_kvarn_default);
     }
 

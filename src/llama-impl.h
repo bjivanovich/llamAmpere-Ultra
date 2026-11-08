@@ -3,8 +3,15 @@
 #include "ggml.h" // for ggml_log_level
 
 #include <string>
+#include <atomic>
+#include <cstdlib>
+#include <thread>
 #include <type_traits>
 #include <vector>
+
+#ifdef _WIN32
+#include <malloc.h>
+#endif
 
 #ifdef __GNUC__
 #    if defined(__MINGW32__) && !defined(__clang__)
@@ -34,6 +41,23 @@ void llama_log_callback_default(ggml_log_level level, const char * text, void * 
 //
 // helpers
 //
+
+static inline void * llama_aligned_alloc(size_t alignment, size_t size) {
+#ifdef _WIN32
+    return _aligned_malloc(size, alignment);
+#else
+    void * ptr = nullptr;
+    return posix_memalign(&ptr, alignment, size) == 0 ? ptr : nullptr;
+#endif
+}
+
+static inline void llama_aligned_free(void * ptr) {
+#ifdef _WIN32
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
+}
 
 template <typename T>
 struct no_init {
@@ -76,7 +100,8 @@ static inline ggml_tensor * llama_mul_mat_hadamard(
 }
 
 // Prefetch the host pages needed to gather these rows.
-void llama_prefetch_rows(const ggml_tensor * tensor, const int32_t * rows, size_t n_rows);
+void llama_prefetch_rows(const ggml_tensor * tensor, const int32_t * rows, size_t n_rows,
+                         std::atomic<size_t> * remaining = nullptr);
 
 struct time_meas {
     time_meas(int64_t & t_acc, bool disable = false);
@@ -98,6 +123,11 @@ struct buffer_view {
 };
 
 void llama_clear_tensor_data(ggml_tensor * t, size_t offset, size_t size);
+
+// [PFGAP] helper threads created from a thread pinned to one CPU inherit that single CPU, so they compete with it for
+// time. When the calling thread is pinned to exactly one CPU, give t every CPU except that one (Linux only; a no-op
+// otherwise or when LLAMA_NO_THREAD_UNPIN=1). Only where threads run changes, never what they compute.
+void llama_thread_off_caller_cpu(std::thread & t);
 
 void replace_all(std::string & s, const std::string & search, const std::string & replace);
 

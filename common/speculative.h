@@ -87,6 +87,10 @@ struct common_speculative_draft_params {
     // exact p/q path above (LLAMA_SPEC_PQ=1, `sampling`) is the sampled-draft implementation.
     float    temp = 1.0f;
     uint32_t seed = LLAMA_DEFAULT_SEED;
+
+    // A shared verify budget can require fewer drafts than the configured minimum.
+    int32_t n_min = -1;
+
 };
 
 common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);
@@ -97,36 +101,40 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
 // process the batch and update the internal state of the speculative context
 bool common_speculative_process(common_speculative * spec, const common_batch & batch);
 
+// Process MTP prompt ranges while target hidden rows still cover the full batch.
+bool common_speculative_supports_process_range(const common_speculative * spec);
+bool common_speculative_process_range(common_speculative * spec, const common_batch & batch, int32_t first, int32_t count);
+// [PREFILLFAST] LLAMA_MTP_B1_HANDOFF=1: the MTP helper can catch up per ubatch from the target's device rows
+bool common_speculative_handoff_enabled(const common_speculative * spec);
+
 // generate drafts for the sequences specified with `common_speculative_get_draft_params`
 void common_speculative_draft(common_speculative * spec);
 
 // informs the speculative context that n_accepted tokens were accepted by the target model
-void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t n_accepted);
+// n_accepted_ctrl >= 0 caps what the adaptive depth controller sees (mode-biased MTP passes the exact rule's count, so
+// the depth choices, and with them the work per round, stay those of exact acceptance); -1 = n_accepted.
+// n_drafted keeps the attempted width across a checkpoint restore (-1 uses the drafter's current state).
+void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t n_accepted, int32_t n_accepted_ctrl = -1, int32_t n_drafted = -1);
+
+// target top-1 probabilities (request-matched) of the tokens one verify round committed; feeds the CDEPTH history.
+// Call once per verify round, not for the re-decode after a checkpoint restore. Unknown entries are negative.
+void common_speculative_note_target_conf(common_speculative * spec, llama_seq_id seq_id, const float * p, size_t n);
 
 // (optional) get/set internal state
+// Serialized bytes without allocating a snapshot; SIZE_MAX means the size is not safe.
+size_t common_speculative_get_state_size(common_speculative * spec, llama_seq_id seq_id);
 bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data);
 void common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
+// Full slot carryover; does not affect partial-checkpoint eligibility.
+bool common_speculative_get_resume_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data);
+bool common_speculative_set_resume_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
+
+
+// Restore a snapshot only if the current implementation accepts its complete state.
+bool common_speculative_restore_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
 
 // print statistics about the speculative decoding
 void common_speculative_print_stats(const common_speculative * spec);
-
-// [#47] LLAMA_HOST_PHASES=1: host-side split of the MTP draft call, process-wide. decode = llama_decode calls (graph
-// build + launch), sync = the wait for the draft GPU work (an explicit llama_synchronize after each decode, only
-// while enabled), sample = common_sampler_sample + common_sampler_accept on the draft logits, rest = everything
-// else inside the draft call (batch rebuild, hidden-row copies, KV trims, candidate bookkeeping).
-struct common_speculative_host_phases {
-    uint64_t n_calls   = 0;
-    uint64_t n_steps   = 0; // draft decodes
-    uint64_t decode_us = 0;
-    uint64_t sync_us   = 0;
-    uint64_t sample_us = 0;
-    uint64_t rest_us   = 0;
-};
-
-bool common_speculative_host_phases_enabled();
-
-// returns the totals since the previous call and resets them
-common_speculative_host_phases common_speculative_host_phases_take();
 
 struct common_speculative_deleter {
     void operator()(common_speculative * s) { common_speculative_free(s); }
@@ -155,3 +163,9 @@ void    common_speculative_observe(common_speculative_init_result * spec, const 
 int32_t common_speculative_refresh(common_speculative_init_result * spec);
 
 common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt);
+
+// Each admitted sequence needs one target row. Retained drafts must stay whole; -1 means a fresh draft.
+// A result of -1 defers the sequence. A zero result must skip drafting, not set draft_params.n_max to zero.
+std::vector<int32_t> common_speculative_row_budget(const std::vector<int32_t> & requested,
+        const std::vector<int32_t> & retained, int32_t capacity, size_t first,
+        const std::vector<std::vector<double>> & acceptance = {});

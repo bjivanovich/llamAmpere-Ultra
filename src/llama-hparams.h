@@ -472,7 +472,7 @@ struct llama_hparams {
     bool has_rope(uint32_t il) const;
 
     // number of effective layers (excludes nextn layers)
-    uint32_t n_layer() const;
+    LLAMA_API uint32_t n_layer() const;
     // number of layers with KV cache
     uint32_t n_layer_kv() const;
 

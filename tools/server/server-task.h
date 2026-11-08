@@ -46,6 +46,7 @@ enum stop_type {
     STOP_TYPE_NONE,
     STOP_TYPE_EOS,
     STOP_TYPE_WORD,
+    STOP_TYPE_LOOP,
     STOP_TYPE_LIMIT,
 };
 
@@ -56,6 +57,12 @@ struct task_params {
     bool return_tokens   = false;
     bool return_progress = false;
 
+    // warm prefill (--warm-prefill): a background prompt-only task that fills the
+    // slot's cache with the next turn's known prefix and then releases the slot
+    // without sampling or sending a result
+    bool    warm          = false;
+    int32_t warm_src_task = -1; // id of the completed task whose reply this warms
+
     int32_t sse_ping_interval = 30; // seconds between SSE comment pings while the stream stays silent, -1 disables
 
     int32_t n_keep    =  0; // number of tokens to keep from initial prompt
@@ -64,7 +71,14 @@ struct task_params {
     int32_t n_indent  =  0; // minimum line indentation for the generated text in number of whitespace characters
     int32_t n_cmpl    =  1; // number of completions to generate from this prompt
 
+    bool    loop_guard = true;
+    int32_t loop_guard_reps = 100;
+
     int32_t n_cache_reuse = 0; // min chunk size to attempt reusing from the cache via KV shifting (0 = disabled)
+
+    // eval-cache builder (--eval-cache-build): snapshot the prompt state at the start of the prompt batch that
+    // contains this token count; if it fits in the first batch, use a physical batch boundary before the logits tail, 0 = off
+    int32_t eval_cache_save_at = 0;
 
     int64_t t_max_prompt_ms  = -1; // TODO: implement
     int64_t t_max_predict_ms = -1; // if positive, limit the generation phase to this time limit
@@ -618,9 +632,13 @@ struct server_prompt {
 
     std::list<common_prompt_checkpoint> checkpoints;
 
+    // scale of each --lora adapter when this KV state was computed
+    std::vector<float> lora_scales;
+
     void clear() {
         tokens.clear();
         checkpoints.clear();
+        lora_scales.clear();
     }
 
     int n_tokens() const {
@@ -631,16 +649,20 @@ struct server_prompt {
         return server_prompt {
             tokens.clone(),
             checkpoints,
+            lora_scales,
         };
     }
 };
 
+struct common_speculative;
+
 struct server_prompt_data {
     std::vector<uint8_t> main;
     std::vector<uint8_t> drft;
+    std::vector<uint8_t> spec;
 
     size_t size() const {
-        return main.size() + drft.size();
+        return main.size() + drft.size() + spec.size();
     }
 };
 
@@ -664,6 +686,14 @@ struct server_prompt_cache {
         this->limit_size   = 1024ull*1024ull*(limit_size_mib < 0 ? 0 : limit_size_mib);
         this->limit_tokens = limit_tokens;
     }
+
+    static void configure(std::unique_ptr<server_prompt_cache> & cache, int32_t limit_mib, size_t n_ctx, bool fit_ram);
+
+    bool fit_ram = false;
+    std::function<uint64_t()> available_ram;
+    bool reserve_ram(size_t extra);
+    size_t disk_read_budget() const;
+    size_t live_ram_budget() const;
 
     std::list<server_prompt_cache_state> states;
 
@@ -716,12 +746,12 @@ struct server_prompt_cache {
     // [#187] hand_over: the entry takes these checkpoints by move instead of copying them (the caller is about to
     // replace or cut its prompt); see server_slot::prompt_reclaim_checkpoints for the way back
     server_prompt_cache_state * alloc(const server_prompt & prompt, size_t state_size_main, size_t state_size_drft,
-            std::list<common_prompt_checkpoint> * hand_over = nullptr);
+            std::list<common_prompt_checkpoint> * hand_over = nullptr, std::vector<uint8_t> state_data_spec = {});
 
     // [#187] true while `state` is a RAM entry of this cache (not loaded, evicted or staged)
     bool holds(const server_prompt_cache_state * state) const;
 
-    bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot);
+    bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot, common_speculative * spec = nullptr);
 
     void update();
 
@@ -731,7 +761,7 @@ struct server_prompt_cache {
 
 private:
     // move a RAM entry's state into the slot's contexts; clears the entry's data on success
-    bool restore(server_prompt_cache_state & state, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot);
+    bool restore(server_prompt_cache_state & state, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot, common_speculative * spec = nullptr);
 
     // drop the oldest RAM entry, spilling it to disk first when the disk tier is enabled
     void evict_front();

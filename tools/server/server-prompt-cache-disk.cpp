@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <system_error>
+#include <stdexcept>
 
 #ifdef _WIN32
 #include <process.h>
@@ -21,11 +22,12 @@ static int pc_getpid() { return (int) getpid(); }
 namespace fs = std::filesystem;
 
 static const char     PC_MAGIC[4] = {'L', 'C', 'P', 'C'};
-static const uint32_t PC_VERSION  = 2;
+static const uint32_t PC_VERSION  = 4;
 
 static constexpr uint64_t PC_MAX_KEY_LEN  = 1u << 20;
 static constexpr uint64_t PC_MAX_N_TOKENS = 1u << 26;
 static constexpr uint32_t PC_MAX_N_CKPT   = 1u << 16;
+static constexpr uint32_t PC_MAX_N_LORA   = 1u << 16;
 
 // word-wise FNV-1a: 8 bytes per multiply, so hashing a multi-GiB entry costs a fraction of writing it
 struct pc_hasher {
@@ -83,6 +85,69 @@ uint64_t server_prompt_disk_hash(const void * data, size_t n, uint64_t seed) {
     return hs.final();
 }
 
+// identity of a model file: size plus a hash of its first and last MiB and 16 evenly spaced 64 KiB samples
+std::string server_prompt_cache_file_identity(const std::string & path, int split_count) {
+    if (split_count < 1 || split_count > UINT16_MAX) {
+        throw std::runtime_error("prompt cache: invalid model split count");
+    }
+    if (split_count > 1) {
+        std::vector<char> buf(path.size() + 1, 0);
+        const int n = llama_split_prefix(buf.data(), buf.size(), path.c_str(), 0, split_count);
+        if (n <= 0 || (size_t) n >= buf.size()) {
+            throw std::runtime_error("prompt cache: invalid split model path: " + path);
+        }
+        const std::string prefix(buf.data(), n);
+        std::string identity = "parts=" + std::to_string(split_count) + ":";
+        for (int i = 0; i < split_count; ++i) {
+            const int len = llama_split_path(buf.data(), buf.size(), prefix.c_str(), i, split_count);
+            if (len <= 0 || (size_t) len >= buf.size()) {
+                throw std::runtime_error("prompt cache: invalid split model path: " + path);
+            }
+            identity += server_prompt_cache_file_identity(std::string(buf.data(), len)) + ";";
+        }
+        return identity;
+    }
+    if (path.empty()) {
+        return "none";
+    }
+
+    std::error_code ec;
+    const uint64_t fsize = std::filesystem::file_size(path, ec);
+    if (ec) {
+        throw std::runtime_error("prompt cache: cannot stat model file: " + path);
+    }
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        throw std::runtime_error("prompt cache: cannot open model file: " + path);
+    }
+    uint64_t h = server_prompt_disk_hash(&fsize, sizeof(fsize));
+
+    auto sample = [&](uint64_t off, uint64_t len) {
+        if (off >= fsize) {
+            return;
+        }
+        len = std::min(len, fsize - off);
+        std::vector<char> buf(len);
+        f.clear();
+        f.seekg((std::streamoff) off);
+        f.read(buf.data(), (std::streamsize) len);
+        if (!f || (uint64_t) f.gcount() != len) {
+            throw std::runtime_error("prompt cache: cannot read model file: " + path);
+        }
+        h = server_prompt_disk_hash(buf.data(), buf.size(), h);
+    };
+
+    const uint64_t MiB = 1024*1024;
+    sample(0, MiB);
+    for (int i = 1; i <= 16; ++i) {
+        sample(fsize / 17 * i, 64*1024);
+    }
+    sample(fsize > MiB ? fsize - MiB : 0, MiB);
+
+    return string_format("parts=1:%" PRIu64 ":%016" PRIx64, fsize, h);
+}
+
 struct pc_writer {
     FILE *    f  = nullptr;
     pc_hasher hs;
@@ -111,7 +176,18 @@ struct pc_reader {
     FILE *    f  = nullptr;
     pc_hasher hs;
     uint64_t  remaining = 0; // bytes left in the file
+    size_t    ram_remaining = SIZE_MAX;
+    bool      ram_exceeded = false;
     bool      ok = true;
+
+    bool claim(size_t n) {
+        if (n > ram_remaining) {
+            ram_exceeded = true;
+            return false;
+        }
+        ram_remaining -= n;
+        return true;
+    }
 
     bool bytes(void * p, size_t n) {
         if (!ok) {
@@ -130,7 +206,7 @@ struct pc_reader {
 
     bool blob(std::vector<uint8_t> & v) {
         uint64_t n = 0;
-        if (!val(n) || n > remaining) {
+        if (!val(n) || n > remaining || n > SIZE_MAX || !claim((size_t) n)) {
             ok = false;
             return false;
         }
@@ -267,7 +343,7 @@ bool server_prompt_disk_tier::parse_header(const std::string & file, server_prom
     f.read(magic, 4);
     f.read((char *) &version, sizeof(version));
     if (!f || memcmp(magic, PC_MAGIC, 4) != 0 || version != PC_VERSION) {
-        bad = true; // includes v1 files: they carry no model/KV key and can never be restored safely
+        bad = true; // includes v1 files (no model/KV key) and v2/v3 files (no lora scales)
         return false;
     }
 
@@ -501,8 +577,17 @@ bool server_prompt_disk_tier::guard_allows(uint64_t need) {
 bool server_prompt_disk_tier::write(const llama_tokens & tokens,
                                     const std::vector<uint8_t> & main,
                                     const std::vector<uint8_t> & drft,
-                                    const std::list<common_prompt_checkpoint> & checkpoints) {
+                                    const std::list<common_prompt_checkpoint> & checkpoints,
+                                    const std::vector<uint8_t> & spec,
+                                    const std::vector<float> & lora_scales, size_t ram_budget) {
     if (!enabled() || tokens.empty() || main.empty()) {
+        return false;
+    }
+
+    // fork: bound the I/O buffer and new token index before any bulk write allocation.
+    const size_t overhead = (4u << 20) + 8192;
+    if (ram_budget != SIZE_MAX && (ram_budget < overhead || tokens.size() > (ram_budget - overhead) / sizeof(llama_token))) {
+        SRV_WRN("%s", "prompt cache disk write skipped to keep its RAM budget\n");
         return false;
     }
 
@@ -514,10 +599,11 @@ bool server_prompt_disk_tier::write(const llama_tokens & tokens,
         }
     }
 
-    uint64_t payload = 8 + main.size() + 8 + drft.size() + 4;
+    uint64_t payload = 8 + main.size() + 8 + drft.size() + 8 + spec.size() + 4;
     for (const auto & c : checkpoints) {
         payload += 8 + 4 + 4 + 4 + 8 + c.data_tgt.size() + 8 + c.data_dft.size() + 8 + c.data_spec.size();
     }
+    payload += 4 + lora_scales.size() * sizeof(float);
     const uint64_t header = 4 + 4 + 8 + 4 + key.size() + 8 + tokens.size() * sizeof(llama_token) + 8;
     const uint64_t total  = header + payload + 8;
 
@@ -572,6 +658,7 @@ bool server_prompt_disk_tier::write(const llama_tokens & tokens,
     w.val<uint64_t>(payload);
     w.blob(main);
     w.blob(drft);
+    w.blob(spec);
     w.val<uint32_t>((uint32_t) checkpoints.size());
     for (const auto & c : checkpoints) {
         w.val<int64_t>(c.n_tokens);
@@ -582,6 +669,8 @@ bool server_prompt_disk_tier::write(const llama_tokens & tokens,
         w.blob(c.data_dft);
         w.blob(c.data_spec);
     }
+    w.val<uint32_t>((uint32_t) lora_scales.size());
+    w.bytes(lora_scales.data(), lora_scales.size() * sizeof(float));
     const uint64_t checksum = w.hs.final();
     if (w.ok && fwrite(&checksum, 1, sizeof(checksum), f) != sizeof(checksum)) {
         w.ok = false;
@@ -628,7 +717,7 @@ bool server_prompt_disk_tier::write(const llama_tokens & tokens,
     return true;
 }
 
-bool server_prompt_disk_tier::read(std::list<server_prompt_disk_entry>::iterator it, server_prompt_disk_record & out) {
+bool server_prompt_disk_tier::read(std::list<server_prompt_disk_entry>::iterator it, server_prompt_disk_record & out, size_t ram_budget) {
     const std::string file = it->file;
 
     std::error_code ec;
@@ -640,10 +729,16 @@ bool server_prompt_disk_tier::read(std::list<server_prompt_disk_entry>::iterator
         entries.erase(it); // gone (another server evicted it)
         return false;
     }
+    out = server_prompt_disk_record();
+    pc_reader r;
+    r.ram_remaining = ram_budget;
+    if (!r.claim(4u << 20)) {
+        fclose(f);
+        return false;
+    }
     std::vector<char> iobuf(4u << 20);
     setvbuf(f, iobuf.data(), _IOFBF, iobuf.size());
 
-    pc_reader r;
     r.f = f;
     r.remaining = fsize;
 
@@ -663,13 +758,18 @@ bool server_prompt_disk_tier::read(std::list<server_prompt_disk_entry>::iterator
     } else if (!r.val(khash) || !r.val(key_len) || key_len > PC_MAX_KEY_LEN) {
         why = "bad key";
     } else {
-        fkey.resize(key_len);
-        if (!r.bytes(fkey.data(), key_len)) {
+        if (!r.claim(key_len + 1)) {
+            why = "RAM budget";
+        } else {
+            fkey.resize(key_len);
+        }
+        if (why || !r.bytes(fkey.data(), key_len)) {
             why = "bad key";
         } else if (khash != key_hash || fkey != key) {
             why     = "key mismatch";
             foreign = true;
-        } else if (!r.val(n_tokens) || n_tokens > PC_MAX_N_TOKENS) {
+        } else if (!r.val(n_tokens) || n_tokens > PC_MAX_N_TOKENS ||
+                !r.claim(2 * n_tokens * sizeof(llama_token))) {
             why = "bad token count";
         } else {
             out.tokens.resize(n_tokens);
@@ -680,19 +780,30 @@ bool server_prompt_disk_tier::read(std::list<server_prompt_disk_entry>::iterator
     }
 
     uint32_t n_ckpt = 0;
-    if (!why && (!r.blob(out.main) || !r.blob(out.drft) || !r.val(n_ckpt) || n_ckpt > PC_MAX_N_CKPT)) {
+    if (!why && (!r.blob(out.main) || !r.blob(out.drft) || !r.blob(out.spec) || !r.val(n_ckpt) || n_ckpt > PC_MAX_N_CKPT)) {
         why = "truncated state";
     }
 
     out.checkpoints.clear();
     for (uint32_t i = 0; !why && i < n_ckpt; ++i) {
         common_prompt_checkpoint c;
-        if (!r.val(c.n_tokens) || !r.val(c.id_task) || !r.val(c.pos_min) || !r.val(c.pos_max) ||
+        if (!r.claim(sizeof(c) + 2 * sizeof(void *)) || !r.val(c.n_tokens) || !r.val(c.id_task) || !r.val(c.pos_min) || !r.val(c.pos_max) ||
             !r.blob(c.data_tgt) || !r.blob(c.data_dft) || !r.blob(c.data_spec)) {
             why = "truncated checkpoint";
             break;
         }
         out.checkpoints.push_back(std::move(c));
+    }
+
+    uint32_t n_lora = 0;
+    if (!why && (!r.val(n_lora) || n_lora > PC_MAX_N_LORA || !r.claim(n_lora * sizeof(float)))) {
+        why = "truncated lora scales";
+    }
+    if (!why) {
+        out.lora_scales.resize(n_lora);
+        if (!r.bytes(out.lora_scales.data(), n_lora * sizeof(float))) {
+            why = "truncated lora scales";
+        }
     }
 
     if (!why) {
@@ -713,6 +824,12 @@ bool server_prompt_disk_tier::read(std::list<server_prompt_disk_entry>::iterator
         out = server_prompt_disk_record();
         it->match = false;
         it->tokens.clear();
+        return false;
+    }
+
+    if (r.ram_exceeded) {
+        SRV_WRN("%s", "prompt cache disk restore skipped to keep its RAM budget\n");
+        out = server_prompt_disk_record();
         return false;
     }
 
