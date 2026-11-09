@@ -18,9 +18,13 @@
 2. **Gyro-Coder TQ2_0 + A8 PLE N-Gram Support (AgentionAI)**:
    - MoE 70B (3.8B active) running in 19.9 GB VRAM while querying a 54-58 GB PLE N-gram table on NVMe via `mmap` at 44 - 53.5 tok/s.
 3. **Multi-Agent Infrastructure (Zero-Config)**:
-   - `router/vmm_router.py`: OpenAI-compatible reverse proxy (`http://127.0.0.1:8000/v1`) with mutual exclusion (`asyncio.Lock`) ready for `pi-coding-agent`, Aider, Cursor, Continue.dev, OpenHands.
-   - `pipeline/autonomous_pipeline.py`: Autonomous 3-agent pipeline runner (Architect -> Coder -> Sandbox -> Debugger).
-   - `mcp/vmm_mcp_server.py`: Native Model Context Protocol server for IDEs.
+   - `master_harness.py`: Supervisor CLI orchestrator with `--swap [on|off]`, `--check-memory`, and `--open-ui`.
+   - `router/vmm_router.py`: OpenAI-compatible reverse proxy (`http://127.0.0.1:8000/v1`) with mutual exclusion (`asyncio.Lock`), strict VRAM eviction barrier (`<3000 MB`), and dynamic swap toggle.
+   - `router/memory_advisor.py`: Engine-Aware Memory Budget Calculator & Windows WDDM 50% pinned RAM cap guardian.
+   - `router/dashboard.html`: Integrated Web Control Studio dashboard served at `http://127.0.0.1:8000/ui`.
+   - `pipeline/autonomous_pipeline.py`: Closed-loop 4-stage pipeline runner (Architect -> Coder -> Sandbox -> Debugger -> Coder Fix) with 502/503 retry tolerance.
+   - `mcp/vmm_mcp_server.py`: Native Model Context Protocol server exposing `vmm_get_memory_budget`, `vmm_list_models`, `vmm_swap_model`, and `vmm_query_agent`.
+   - `extensions/`: Native desktop integrations including Paseo plugin (`extensions/paseo-vmm-swap/`) and Pi-coding-agent skill (`extensions/pi-coding-agent/`).
    - `scripts/sync_upstream.py`: Automated tool to monitor and sync updates from upstream JakeATX/llamAmpere, Strata, and AgentionAI.
 
 > **Standalone VMM Swap Repository:**

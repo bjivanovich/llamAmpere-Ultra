@@ -86,13 +86,23 @@ def main():
         print(">> Could not query Strata releases (API rate limit or network).")
 
     # 4. Check AgentionAI models
-    print("\n[3/3] Checking AgentionAI (Gyro-Coder / Flash-Next) Hugging Face models...")
+    print("\n[3/4] Checking AgentionAI (Gyro-Coder / Flash-Next) Hugging Face models...")
     agention_models = check_hf_models("agentionai")
     if agention_models:
         for m in agention_models:
             print(f"   - {m.get('id')}")
     else:
         print(">> Could not query AgentionAI models.")
+
+    # 5. Check cuda-vmm-swap releases
+    print("\n[4/4] Checking bjivanovich/cuda-vmm-swap ecosystem releases...")
+    vmm_releases = check_github_releases("bjivanovich/cuda-vmm-swap")
+    if vmm_releases:
+        latest_vmm = vmm_releases[0]
+        print(f">> Latest cuda-vmm-swap Release: {latest_vmm.get('tag_name')} ({latest_vmm.get('name')})")
+        print(f"   Published at: {latest_vmm.get('published_at')}")
+    else:
+        print(">> Could not query cuda-vmm-swap releases (API rate limit or network).")
 
     print("\n" + "=" * 75)
     if int(behind_count) > 0:

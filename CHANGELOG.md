@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.1] - 2026-11-09
+
+### Added
+- **Full Synchronization with `cuda-vmm-swap` v2.3.0+**:
+  - Engine-Aware Memory Budget Calculator (`router/memory_advisor.py`) supporting Windows WDDM 50% pinned RAM cap and TurboQuant/SJ-KVaRN KV cache sizing.
+  - Web Control Studio Dashboard (`router/dashboard.html`) served at `/` and `/ui` with real-time VRAM/RAM gauges and hot-swap controls.
+  - MCP tool `vmm_get_memory_budget` added to `mcp/vmm_mcp_server.py`.
+  - Master Orchestrator Harness (`master_harness.py`) with `--swap [on|off]`, `--check-memory`, and `--open-ui`.
+  - Desktop extensions in `extensions/` including native Paseo plugin (`extensions/paseo-vmm-swap/`) and Pi-coding-agent skill (`extensions/pi-coding-agent/SKILL.md`).
+  - Closed-loop autonomous pipeline upgrades (`pipeline/autonomous_pipeline.py`) with 5-stage retry backoff on 502/503 and deep reasoning extraction.
+
+### Changed
+- `router/vmm_router.py`: Upgraded to v2.3.0 with strict VRAM eviction barrier (`<3000 MB` physical check via `nvidia-smi`), dynamic swap toggle, and integrated dashboard serving.
+- `router/router_config.json`: Added `swap_enabled`, `engine_type`, and `--reasoning-budget` parameters.
+
+---
+
 ## [0.7.0] - 2026-11-04
 
 ### Added
