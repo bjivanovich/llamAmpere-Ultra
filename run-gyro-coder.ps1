@@ -2,17 +2,28 @@ $env:GGML_CUDA_GRAPH_OPT = "1"
 $env:GGML_Q8_TURBO3_MMA_FUSED = "1"
 $env:GGML_CUDA_FA_I8QK = "1"
 
-$modelPath = "D:\models\Qwen3.8-Flash-Next-Gyro-Coder-TQ2_0.gguf"
+$modelPath = if (Test-Path "D:\models\Qwen3.8-Flash-Next-Gyro-Coder-TQ2_0-noPLE.gguf") { "D:\models\Qwen3.8-Flash-Next-Gyro-Coder-TQ2_0-noPLE.gguf" } else { "D:\models\Qwen3.8-Flash-Next-Gyro-Coder-TQ2_0.gguf" }
+$plePath = "D:\models\Qwen3.8-Flash-Next-PLE-Q8_0.gguf"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host " Iniciando Gyro-Coder TQ2_0 (Arquitecto / Depurador)" -ForegroundColor Green
+Write-Host " Iniciando Gyro-Coder TQ2_0 (Ingeniero de Codigo)" -ForegroundColor Green
 Write-Host " Hardware: RTX 3090 (24GB VRAM) - 100% Offload en GPU" -ForegroundColor Yellow
 Write-Host " Contexto: 96K (98,304 tokens) | KV Cache: Q8_0" -ForegroundColor Magenta
 Write-Host " Velocidad Sostenida Verificada: 53.54 tok/s | Prefill: 219 tok/s" -ForegroundColor Green
+Write-Host " Modelo: $modelPath" -ForegroundColor Gray
+if (Test-Path $plePath) {
+    Write-Host " Tabla PLE Modular: $plePath" -ForegroundColor Gray
+}
 Write-Host "==========================================================" -ForegroundColor Cyan
+
+$extraArgs = @()
+if (Test-Path $plePath) {
+    $extraArgs += @("--ple", $plePath)
+}
 
 & "C:\Users\bj_iv\Desktop\llamAmpere-Ultra\bin\Release\llama-server.exe" `
   -m $modelPath `
+  @extraArgs `
   -ngl 999 `
   -c 98304 `
   -ctk q8_0 `

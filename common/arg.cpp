@@ -3326,6 +3326,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_MOE_CPU_SHARE"));
     add_opt(common_arg(
+        {"--ple"}, "FILE",
+        "load external PLE table (per_layer_token_embd.weight) from a separate GGUF file",
+        [](common_params &, const std::string & value) {
+            common_set_env("LLAMA_PLE_GGUF", value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_PLE"));
+    add_opt(common_arg(
         {"--moe-cache"}, "MODE",
         "adaptively cache the hottest CPU-resident MoE experts in spare VRAM "
         "(default: auto; auto = preserve weight repacking; on = automatic budget without weight repacking; "

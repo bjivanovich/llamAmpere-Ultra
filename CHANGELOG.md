@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.2] - 2026-11-10
+
+### Added
+- **Modular External PLE Table Support (`--ple` / `LLAMA_PLE_GGUF`)**:
+  - Added CLI flag `--ple <path>` and environment variable `LLAMA_PLE_GGUF` (and `LLAMA_ARG_PLE`) across `llama-server`, `llama-cli`, and `llama-bench`.
+  - Dynamic on-demand mapping of external `per_layer_token_embd.weight` GGUF files in `src/llama-model-loader.cpp`.
+  - Enables sharing a single 54 GB PLE table (`Qwen3.8-Flash-Next-PLE-Q8_0.gguf`) across multiple decoupled models (`-noPLE` Gyro-Coder TQ2_0 and pruned 128, 160, 176, 192 Expert models) via lazy NVMe mmap (`TENSOR_READ_LAZY`) without consuming VRAM or host memory.
+
+---
+
 ## [0.7.1] - 2026-11-09
 
 ### Added

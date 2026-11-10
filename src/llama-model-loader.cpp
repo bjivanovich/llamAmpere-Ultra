@@ -1163,6 +1163,48 @@ llama_model_loader::llama_model_loader(
         }
     }
 
+    // LLAMA_PLE_GGUF: load external PLE table if missing in base model
+    if (const char * ple_file = getenv("LLAMA_PLE_GGUF"); ple_file && ple_file[0] && !fname.empty()) {
+        const int kid = gguf_find_key(metadata, llm_kv(LLM_KV_PLE_LAYERS).c_str());
+        if (kid >= 0 && weights_map.find("per_layer_token_embd.weight") == weights_map.end()) {
+            struct ggml_context * ctx = NULL;
+            struct gguf_init_params ple_params = {
+                /*.no_alloc = */ true,
+                /*.ctx      = */ &ctx,
+            };
+            gguf_context_ptr ctx_gguf { gguf_init_from_file(ple_file, ple_params) };
+            if (!ctx_gguf) {
+                throw std::runtime_error(format("%s: failed to load external PLE GGUF: %s", __func__, ple_file));
+            }
+            if (files.size() >= UINT16_MAX) {
+                throw std::runtime_error("too many model files for PLE table");
+            }
+            const uint16_t idx = (uint16_t) files.size();
+            files.emplace_back(new llama_file(ple_file, "rb", false));
+            contexts.emplace_back(ctx);
+
+            int n_added = 0;
+            size_t added_bytes = 0;
+            for (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
+                std::string tensor_name = std::string(cur->name);
+                if (tensor_name == "per_layer_token_embd.weight") {
+                    n_elements  += ggml_nelements(cur);
+                    n_bytes     += ggml_nbytes(cur);
+                    added_bytes += ggml_nbytes(cur);
+                    weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), idx, ctx_gguf.get(), cur));
+                    ++n_added;
+                }
+            }
+            if (n_added > 0) {
+                LLAMA_LOG_INFO("%s: loaded external PLE table '%s' from %s: %.2f GiB (TENSOR_READ_LAZY)\n",
+                               __func__, "per_layer_token_embd.weight", ple_file, added_bytes / 1073741824.0);
+            } else {
+                LLAMA_LOG_WARN("%s: external PLE GGUF %s does not contain 'per_layer_token_embd.weight'\n",
+                               __func__, ple_file);
+            }
+        }
+    }
+
     n_kv      = gguf_get_n_kv(metadata);
     n_tensors = weights_map.size();
 
