@@ -24,6 +24,7 @@
    - Comparative Context Benchmarks on RTX 3090 (24GB):
      - **Qwen3.8-160Exp Q3_K_M (96K context, TurboKV `-ctk turbo5 -ctv turbo4`)**: **45.13 - 45.94 tok/s sustained** (verified with 3,500 continuous tokens generated in 77.55s, TTFT 615.8 ms, peak VRAM 24,008 MB, 100% GPU residency with `LLAMA_MOE_ARENA=off`).
      - **Gyro-Coder TQ2_0 (64K context, Q8_0 KV Cache)**: **44.86 tok/s** (100% GPU VRAM residency via native TQ2_T engine, TTFT 1.6s, VRAM 22.6 GB).
+     - **Qwen3.8-128Exp Q4_K_M (96K context, TurboKV `-ctk turbo5 -ctv turbo4`)**: **35.97 - 36.17 tok/s sustained** (verified with 3,500 continuous tokens generated in 97.31s, TTFT 715.5 ms, peak VRAM 24,214 MB, 100% GPU residency with `LLAMA_MOE_ARENA=off`).
      - **Qwen3.8-176Exp Q3_K_S (64K context, TurboKV with `LLAMA_MOE_ARENA=off`)**: **36.33 - 44.78 tok/s** (native GPU execution with PLE N-gram prefetch; bypassing the Linux-specific host arena fallback).
 4. **Enhanced CLI & Model Tuning Infrastructure**:
    - Universal `--override-kv` type parser supporting standard GGUF keys (`u32:`, `uint:`, `i32:`, `i64:`, `f32:`, `int:`, `str:`, `bool:`).
