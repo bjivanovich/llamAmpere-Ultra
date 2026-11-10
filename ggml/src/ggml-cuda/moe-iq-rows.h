@@ -29,13 +29,24 @@ namespace moe_iq {
 // ksigns_iq2xs maps a 7-bit sign index to the 8 sign bits of a weight group (bit 7 is the parity bit). Widen each
 // entry once to one byte per weight: 0x01 keeps the activation, 0xFF negates it (the second operand of
 // _mm256_sign_epi8).
+static constexpr uint8_t ksigns_iq2xs_table[128] = {
+      0, 129, 130,   3, 132,   5,   6, 135, 136,   9,  10, 139,  12, 141, 142,  15,
+    144,  17,  18, 147,  20, 149, 150,  23,  24, 153, 154,  27, 156,  29,  30, 159,
+    160,  33,  34, 163,  36, 165, 166,  39,  40, 169, 170,  43, 172,  45,  46, 175,
+     48, 177, 178,  51, 180,  53,  54, 183, 184,  57,  58, 187,  60, 189, 190,  63,
+    192,  65,  66, 195,  68, 197, 198,  71,  72, 201, 202,  75, 204,  77,  78, 207,
+     80, 209, 210,  83, 212,  85,  86, 215, 216,  89,  90, 219,  92, 221, 222,  95,
+     96, 225, 226,  99, 228, 101, 102, 231, 232, 105, 106, 235, 108, 237, 238, 111,
+    240, 113, 114, 243, 116, 245, 246, 119, 120, 249, 250, 123, 252, 125, 126, 255,
+};
+
 struct pm_lut {
     uint64_t v[128];
     constexpr pm_lut() : v() {
         for (int i = 0; i < 128; ++i) {
             uint64_t w = 0;
             for (int bit = 0; bit < 8; ++bit) {
-                w |= ((ksigns_iq2xs[i] >> bit) & 1 ? 0xFFull : 0x01ull) << (8 * bit);
+                w |= ((ksigns_iq2xs_table[i] >> bit) & 1 ? 0xFFull : 0x01ull) << (8 * bit);
             }
             v[i] = w;
         }

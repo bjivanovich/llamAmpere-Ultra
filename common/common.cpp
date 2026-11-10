@@ -672,12 +672,39 @@ bool string_parse_kv_override(const char * data, std::vector<llama_model_kv_over
     std::strncpy(kvo.key, data, sep - data);
     kvo.key[sep - data] = 0;
     sep++;
-    if (strncmp(sep, "int:", 4) == 0) {
+    if (strncmp(sep, "int:", 4) == 0 ||
+        strncmp(sep, "i32:", 4) == 0 ||
+        strncmp(sep, "i64:", 4) == 0 ||
+        strncmp(sep, "u32:", 4) == 0 ||
+        strncmp(sep, "u64:", 4) == 0) {
         sep += 4;
+        kvo.tag = LLAMA_KV_OVERRIDE_TYPE_INT;
+        kvo.val_i64 = std::atol(sep);
+    } else if (strncmp(sep, "uint:", 5) == 0) {
+        sep += 5;
+        kvo.tag = LLAMA_KV_OVERRIDE_TYPE_INT;
+        kvo.val_i64 = std::atol(sep);
+    } else if (strncmp(sep, "int32:", 6) == 0 ||
+               strncmp(sep, "int64:", 6) == 0) {
+        sep += 6;
+        kvo.tag = LLAMA_KV_OVERRIDE_TYPE_INT;
+        kvo.val_i64 = std::atol(sep);
+    } else if (strncmp(sep, "uint32:", 7) == 0 ||
+               strncmp(sep, "uint64:", 7) == 0) {
+        sep += 7;
         kvo.tag = LLAMA_KV_OVERRIDE_TYPE_INT;
         kvo.val_i64 = std::atol(sep);
     } else if (strncmp(sep, "float:", 6) == 0) {
         sep += 6;
+        kvo.tag = LLAMA_KV_OVERRIDE_TYPE_FLOAT;
+        kvo.val_f64 = std::atof(sep);
+    } else if (strncmp(sep, "f32:", 4) == 0 ||
+               strncmp(sep, "f64:", 4) == 0) {
+        sep += 4;
+        kvo.tag = LLAMA_KV_OVERRIDE_TYPE_FLOAT;
+        kvo.val_f64 = std::atof(sep);
+    } else if (strncmp(sep, "double:", 7) == 0) {
+        sep += 7;
         kvo.tag = LLAMA_KV_OVERRIDE_TYPE_FLOAT;
         kvo.val_f64 = std::atof(sep);
     } else if (strncmp(sep, "bool:", 5) == 0) {

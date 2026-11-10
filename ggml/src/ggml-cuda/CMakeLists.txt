@@ -69,7 +69,7 @@ if (CUDAToolkit_FOUND)
         endif()
     endif()
 
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler -Xcompiler /bigobj")
     enable_language(CUDA)
 
     if (GGML_CUDA_CCCL_VERSION)
@@ -283,7 +283,7 @@ if (CUDAToolkit_FOUND)
     else()
         # CCCL 3.2 onwards will require a cpp-standard-compliant preprocessor for MSVC
         # https://github.com/NVIDIA/cccl/pull/6827
-        list(APPEND CUDA_CXX_FLAGS /Zc:preprocessor)
+        list(APPEND CUDA_CXX_FLAGS /Zc:preprocessor /bigobj)
     endif()
 
     list(JOIN   CUDA_CXX_FLAGS " " CUDA_CXX_FLAGS_JOINED)  # pass host compiler flags as a single argument

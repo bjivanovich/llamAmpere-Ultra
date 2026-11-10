@@ -14,6 +14,15 @@
 #include <stdlib.h> // for qsort
 #include <stdio.h>  // for GGML_ASSERT
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+static inline int __builtin_ctz(unsigned int x) {
+    unsigned long r = 0;
+    _BitScanForward(&r, x);
+    return (int)r;
+}
+#endif
+
 #define GROUP_MAX_EPS 1e-15f
 #define GROUP_MAX_EPS_IQ3_XXS 1e-8f
 #define GROUP_MAX_EPS_IQ2_S 1e-8f

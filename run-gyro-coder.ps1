@@ -33,6 +33,7 @@ if (Test-Path $plePath) {
   -t 8 `
   -tb 8 `
   -fa on `
+  --jinja `
   --ctx-checkpoints 0 `
   --parallel 1 `
   --prio 3 `

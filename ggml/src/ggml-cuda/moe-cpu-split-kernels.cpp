@@ -16,6 +16,13 @@
 #endif
 #if defined(_MSC_VER) && !defined(__clang__)
 #include <intrin.h>
+#ifndef _cvtsh_ss
+static inline float _cvtsh_ss(uint16_t h) {
+    __m128i v = _mm_cvtsi32_si128((int)h);
+    __m128 f = _mm_cvtph_ps(v);
+    return _mm_cvtss_f32(f);
+}
+#endif
 #endif
 #ifndef MOE_CS_IMPL
 #define MOE_CS_IMPL moe_cs_scalar_math
