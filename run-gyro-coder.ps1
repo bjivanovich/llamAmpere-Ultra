@@ -1,3 +1,4 @@
+$env:LLAMA_MOE_ARENA = "off"
 $env:GGML_CUDA_GRAPH_OPT = "1"
 $env:GGML_Q8_TURBO3_MMA_FUSED = "1"
 $env:GGML_CUDA_FA_I8QK = "1"
