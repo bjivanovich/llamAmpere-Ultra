@@ -20,10 +20,11 @@
    - Enables decoupled inference: a single 54 GB PLE table (`Qwen3.8-Flash-Next-PLE-Q8_0.gguf`) is shared across multiple pruned model variants (`-noPLE` Gyro-Coder TQ2_0 and pruned 128..192 expert models) without consuming GPU VRAM or host memory.
    - Built-in `[PLEPF]` prefetching threadpool for anticipatory page loading ahead of token generation.
 3. **Gyro-Coder TQ2_0 & MoE Architecture on RTX 3090 (24 GB)**:
-   - MoE 70B (3.8B active) running 100% in GPU VRAM (22.6 GB VRAM at 64k - 96k context) querying the 54 GB PLE table on NVMe via `mmap` at **44.86 tok/s sustained decode** (TTFT 1.6s).
-   - Comparative 64k Context Benchmark:
-     - **Gyro-Coder TQ2_0 (64K context, Q8_0 KV Cache)**: **44.86 tok/s** (100% GPU VRAM residency via native TQ2_T engine).
-     - **Qwen3.8-176Exp Q3_K_S (with LLAMA_MOE_ARENA=off)**: **36.33 - 44.78 tok/s** (native GPU execution with PLE N-gram prefetch; bypassing the Linux-specific host arena fallback).
+   - MoE 70B (3.8B active) running 100% in GPU VRAM (22.6 - 24.0 GB VRAM at 64k - 96k context) querying the 54 GB PLE table on NVMe via `mmap` at **44.86 - 45.94 tok/s sustained decode** (TTFT 615ms - 1.6s).
+   - Comparative Context Benchmarks on RTX 3090 (24GB):
+     - **Qwen3.8-160Exp Q3_K_M (96K context, TurboKV `-ctk turbo5 -ctv turbo4`)**: **45.13 - 45.94 tok/s sustained** (verified with 3,500 continuous tokens generated in 77.55s, TTFT 615.8 ms, peak VRAM 24,008 MB, 100% GPU residency with `LLAMA_MOE_ARENA=off`).
+     - **Gyro-Coder TQ2_0 (64K context, Q8_0 KV Cache)**: **44.86 tok/s** (100% GPU VRAM residency via native TQ2_T engine, TTFT 1.6s, VRAM 22.6 GB).
+     - **Qwen3.8-176Exp Q3_K_S (64K context, TurboKV with `LLAMA_MOE_ARENA=off`)**: **36.33 - 44.78 tok/s** (native GPU execution with PLE N-gram prefetch; bypassing the Linux-specific host arena fallback).
 4. **Enhanced CLI & Model Tuning Infrastructure**:
    - Universal `--override-kv` type parser supporting standard GGUF keys (`u32:`, `uint:`, `i32:`, `i64:`, `f32:`, `int:`, `str:`, `bool:`).
    - Native `--jinja` template engine integration for Qwen4Exp official chat templates.
