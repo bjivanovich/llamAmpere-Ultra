@@ -22,8 +22,8 @@
 3. **Gyro-Coder TQ2_0 & MoE Architecture on RTX 3090 (24 GB)**:
    - MoE 70B (3.8B active) running 100% in GPU VRAM (22.6 GB VRAM at 64k - 96k context) querying the 54 GB PLE table on NVMe via `mmap` at **44.86 tok/s sustained decode** (TTFT 1.6s).
    - Comparative 64k Context Benchmark:
-     - **Gyro-Coder TQ2_0 (64K context, Q8_0 KV Cache)**: **44.86 tok/s** (100% VRAM residency, zero PCIe bus stalls).
-     - **Qwen3.8-176Exp Q3_K_S (64K context, TurboKV turbo5/turbo4)**: **3.90 tok/s** (18.33 GiB routed expert arena spills to unpinned host mmap over PCIe due to 24 GB card boundary).
+     - **Gyro-Coder TQ2_0 (64K context, Q8_0 KV Cache)**: **44.86 tok/s** (100% GPU VRAM residency via native TQ2_T engine).
+     - **Qwen3.8-176Exp Q3_K_S (with LLAMA_MOE_ARENA=off)**: **36.33 - 44.78 tok/s** (native GPU execution with PLE N-gram prefetch; bypassing the Linux-specific host arena fallback).
 4. **Enhanced CLI & Model Tuning Infrastructure**:
    - Universal `--override-kv` type parser supporting standard GGUF keys (`u32:`, `uint:`, `i32:`, `i64:`, `f32:`, `int:`, `str:`, `bool:`).
    - Native `--jinja` template engine integration for Qwen4Exp official chat templates.
