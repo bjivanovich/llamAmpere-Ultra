@@ -23,6 +23,7 @@
    - MoE 70B (3.8B active) running 100% in GPU VRAM (22.6 - 24.0 GB VRAM at 64k - 96k context) querying the 54 GB PLE table on NVMe via `mmap` at **44.86 - 45.94 tok/s sustained decode** (TTFT 615ms - 1.6s).
    - Comparative Context Benchmarks on RTX 3090 (24GB):
      - **Qwen3.8-160Exp Q3_K_M (96K context, TurboKV `-ctk turbo5 -ctv turbo4`)**: **45.13 - 45.94 tok/s sustained** (verified with 3,500 continuous tokens generated in 77.55s, TTFT 615.8 ms, peak VRAM 24,008 MB, 100% GPU residency with `LLAMA_MOE_ARENA=off`).
+     - **Qwen3.8-128Exp Q3_K_M (96K context, TurboKV `-ctk turbo5 -ctv turbo4`)**: **48.87 - 49.14 tok/s sustained** (verified with 3,500 continuous tokens generated in 71.61s, TTFT 639.4 ms, peak VRAM 20,031 MB, 100% GPU residency with `LLAMA_MOE_ARENA=off`).
      - **Gyro-Coder TQ2_0 (64K context, Q8_0 KV Cache)**: **44.86 tok/s** (100% GPU VRAM residency via native TQ2_T engine, TTFT 1.6s, VRAM 22.6 GB).
      - **Qwen3.8-128Exp Q4_K_M (96K context, TurboKV `-ctk turbo5 -ctv turbo4`)**: **35.97 - 36.17 tok/s sustained** (verified with 3,500 continuous tokens generated in 97.31s, TTFT 715.5 ms, peak VRAM 24,214 MB, 100% GPU residency with `LLAMA_MOE_ARENA=off`).
      - **Qwen3.8-176Exp Q3_K_S (64K context, TurboKV with `LLAMA_MOE_ARENA=off`)**: **36.33 - 44.78 tok/s** (native GPU execution with PLE N-gram prefetch; bypassing the Linux-specific host arena fallback).
