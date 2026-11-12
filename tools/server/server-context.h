@@ -157,6 +157,10 @@ struct server_routes {
     server_http_context::handler_t post_systemone;
     server_http_context::handler_t get_lora_adapters;
     server_http_context::handler_t post_lora_adapters;
+    // VMM fast model swapping
+    server_http_context::handler_t post_vmm_sleep;
+    server_http_context::handler_t post_vmm_wake;
+    server_http_context::handler_t get_vmm_status;
 
     // to be used in router mode
     json get_model_info() const;

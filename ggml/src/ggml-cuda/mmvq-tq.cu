@@ -577,12 +577,13 @@ static __global__ void mul_mat_tq3_1s_dp4a_multi(
         const float fd0 = __half2float(blk->d0);
         const float fd1 = __half2float(blk->d1);
 
-        // Load 12 bytes of weight into 4 groups of 3 bytes (8 x 3-bit indices each)
-        const uint8_t * qs = blk->qs;
-        const uint32_t g0 = (uint32_t)qs[0]  | ((uint32_t)qs[1]  << 8) | ((uint32_t)qs[2]  << 16);
-        const uint32_t g1 = (uint32_t)qs[3]  | ((uint32_t)qs[4]  << 8) | ((uint32_t)qs[5]  << 16);
-        const uint32_t g2 = (uint32_t)qs[6]  | ((uint32_t)qs[7]  << 8) | ((uint32_t)qs[8]  << 16);
-        const uint32_t g3 = (uint32_t)qs[9]  | ((uint32_t)qs[10] << 8) | ((uint32_t)qs[11] << 16);
+        // Load 12 bytes of weight as 3 coalesced 32-bit words, extract 4 groups of 24 bits
+        const uint32_t * qs32 = (const uint32_t *)(blk->qs);
+        const uint32_t w0 = qs32[0], w1 = qs32[1], w2 = qs32[2];
+        const uint32_t g0 = w0 & 0x00FFFFFFu;
+        const uint32_t g1 = (w0 >> 24) | ((w1 & 0x0000FFFFu) << 8);
+        const uint32_t g2 = (w1 >> 16) | ((w2 & 0x000000FFu) << 16);
+        const uint32_t g3 = w2 >> 8;
 
         int c0_0, c1_0, c0_1, c1_1, c0_2, c1_2, c0_3, c1_3;
         tq3_cents8_reg(g0, c0_0, c1_0);
@@ -1339,11 +1340,13 @@ static __global__ void mul_mat_tq3_1s_dp4a_moe(
         const float fd0 = __half2float(blk->d0);
         const float fd1 = __half2float(blk->d1);
 
-        const uint8_t * qs = blk->qs;
-        const uint32_t g0 = (uint32_t)qs[0]  | ((uint32_t)qs[1]  << 8) | ((uint32_t)qs[2]  << 16);
-        const uint32_t g1 = (uint32_t)qs[3]  | ((uint32_t)qs[4]  << 8) | ((uint32_t)qs[5]  << 16);
-        const uint32_t g2 = (uint32_t)qs[6]  | ((uint32_t)qs[7]  << 8) | ((uint32_t)qs[8]  << 16);
-        const uint32_t g3 = (uint32_t)qs[9]  | ((uint32_t)qs[10] << 8) | ((uint32_t)qs[11] << 16);
+        // Load 12 bytes of weight as 3 coalesced 32-bit words, extract 4 groups of 24 bits
+        const uint32_t * qs32 = (const uint32_t *)(blk->qs);
+        const uint32_t w0 = qs32[0], w1 = qs32[1], w2 = qs32[2];
+        const uint32_t g0 = w0 & 0x00FFFFFFu;
+        const uint32_t g1 = (w0 >> 24) | ((w1 & 0x0000FFFFu) << 8);
+        const uint32_t g2 = (w1 >> 16) | ((w2 & 0x000000FFu) << 16);
+        const uint32_t g3 = w2 >> 8;
 
         int c0_0, c1_0, c0_1, c1_1, c0_2, c1_2, c0_3, c1_3;
         tq3_cents8_reg(g0, c0_0, c1_0);

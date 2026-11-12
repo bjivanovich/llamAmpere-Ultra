@@ -20,6 +20,7 @@ private:
     bool stopped  = false; // set by terminate(); unlike running, never false before start_loop()
     bool sleeping = false;
     bool req_stop_sleeping = false;
+    bool req_start_sleeping = false;
     int64_t time_last_task = 0;
 
     // queues
@@ -74,6 +75,10 @@ public:
     // if sleeping, request exiting sleep state and wait until it is done
     // returns immediately if not sleeping
     void wait_until_no_sleep();
+
+    // request entering sleep state and wait until it is done
+    // returns immediately if already sleeping
+    void request_sleep_and_wait();
 
     bool is_sleeping() {
         std::unique_lock<std::mutex> lock(mutex_tasks);

@@ -197,6 +197,7 @@ class VMMStateManager:
 
         env = os.environ.copy()
         env.update(model_env)
+        env["LLAMAMPERE_ENABLE_SLEEP"] = "1"
 
         cmd = [
             ENGINE_EXE,
@@ -252,12 +253,46 @@ class VMMStateManager:
             logger.error(f"Failed to spawn backend {role_key}: {e}")
             return False
 
-    def evict_backend(self, role_key: str):
-        """Immediately frees GPU VRAM and system RAM by terminating the process."""
+    def sleep_backend(self, role_key: str) -> bool:
+        """Sends native VMM sleep command (/vmm/sleep) to unmap physical GPU VRAM in <60ms."""
+        model_info = MODELS.get(role_key)
+        if not model_info:
+            return False
+        port = model_info.get("backend_port", 8081)
+        url = f"http://127.0.0.1:{port}/vmm/sleep"
+        try:
+            with httpx.Client(timeout=3.0) as client:
+                r = client.post(url)
+                if r.status_code == 200:
+                    logger.info(f">> [VMM SLEEP]: '{role_key}' unmapped physical VRAM via native cuMemUnmap (<60ms).")
+                    return True
+        except Exception as e:
+            logger.warning(f">> [VMM SLEEP WARNING]: HTTP /vmm/sleep failed for '{role_key}': {e}")
+        return False
+
+    def wake_backend(self, role_key: str) -> bool:
+        """Sends native VMM wake command (/vmm/wake) to remap GPU VRAM via cuMemMap and DMA in <2s."""
+        model_info = MODELS.get(role_key)
+        if not model_info:
+            return False
+        port = model_info.get("backend_port", 8081)
+        url = f"http://127.0.0.1:{port}/vmm/wake"
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                r = client.post(url)
+                if r.status_code == 200:
+                    logger.info(f">> [VMM WAKE]: '{role_key}' remapped physical VRAM via native cuMemMap + DMA (<2s).")
+                    return True
+        except Exception as e:
+            logger.warning(f">> [VMM WAKE WARNING]: HTTP /vmm/wake failed for '{role_key}': {e}")
+        return False
+
+    def hard_terminate_backend(self, role_key: str):
+        """Emergency or shutdown fallback: terminates the process."""
         if role_key not in self.running_processes:
             return
 
-        logger.info(f">> [VMM EVICTION]: Evicting '{role_key}' from memory (<60ms)...")
+        logger.info(f">> [HARD TERMINATION]: Terminating process for '{role_key}'...")
         proc = self.running_processes.pop(role_key, None)
         if proc:
             try:
@@ -268,15 +303,18 @@ class VMMStateManager:
                     proc.kill()
                 except Exception:
                     pass
-        logger.info(f">> [VMM EVICTED]: '{role_key}' terminated. VRAM/RAM 100% released.")
+        logger.info(f">> [HARD TERMINATED]: '{role_key}' process exited.")
 
     def enforce_vram_eviction(self, current_role: str, max_wait_s: float = 6.0) -> bool:
         """
         STRICT RULE: The model in VRAM must be completely evicted and physical VRAM
         verified released (< 3000 MB) BEFORE any swap from RAM to VRAM can proceed.
+        Uses native VMM /vmm/sleep first (<60ms), falling back to process termination only if needed.
         """
         logger.info(f">> [STRICT RULE]: Evicting '{current_role}' from VRAM before allowing swap...")
-        self.evict_backend(current_role)
+        
+        # 1. Try native VMM sleep first (<60ms)
+        self.sleep_backend(current_role)
         self.active_vram_model = None
 
         t0 = time.time()
@@ -285,11 +323,24 @@ class VMMStateManager:
             if vram >= 0 and vram < 3000:
                 logger.info(f">> [STRICT RULE VERIFIED]: Physical VRAM cleared to {vram} MB. Swap/Wake permitted.")
                 return True
-            time.sleep(0.15)
+            time.sleep(0.05)
+
+        # 2. If VRAM is still elevated, attempt hard eviction fallback
+        vram = get_gpu_vram_used_mb()
+        logger.warning(f">> [STRICT RULE]: VRAM is {vram} MB after VMM sleep. Executing hard eviction fallback...")
+        self.hard_terminate_backend(current_role)
+
+        t1 = time.time()
+        while time.time() - t1 < 3.0:
+            vram = get_gpu_vram_used_mb()
+            if vram >= 0 and vram < 3000:
+                logger.info(f">> [STRICT RULE VERIFIED]: Physical VRAM cleared to {vram} MB after hard eviction.")
+                return True
+            time.sleep(0.1)
 
         vram = get_gpu_vram_used_mb()
-        logger.warning(f">> [STRICT RULE]: VRAM is {vram} MB after eviction wait.")
-        return True
+        logger.error(f">> [STRICT RULE FAILED]: Physical VRAM is {vram} MB. Eviction failed, refusing swap!")
+        return False
 
     async def ensure_active(self, target_model: str) -> float:
         """
@@ -301,7 +352,9 @@ class VMMStateManager:
             prev_model = self.active_vram_model
 
             if prev_model == target_model and target_model in self.running_processes:
-                return 0.0
+                proc = self.running_processes[target_model]
+                if proc.poll() is None:
+                    return 0.0
 
             # If swap is disabled, refuse switching if another model is already active
             if not self.swap_enabled and prev_model is not None and prev_model != target_model:
@@ -311,7 +364,9 @@ class VMMStateManager:
             # STRICT RULE ENFORCEMENT:
             if prev_model is not None and prev_model != target_model:
                 logger.info(f">> [VMM STRICT RULE]: '{prev_model}' occupies VRAM. Expelling before swap to '{target_model}'...")
-                self.enforce_vram_eviction(prev_model)
+                evicted = self.enforce_vram_eviction(prev_model)
+                if not evicted:
+                    raise RuntimeError(f"VMM Eviction failed for '{prev_model}': physical VRAM not released. Aborting swap to prevent OOM!")
 
             # Safety barrier: if physical VRAM is still elevated (> 6000 MB), clear orphaned processes
             vram_check = get_gpu_vram_used_mb()
@@ -319,13 +374,21 @@ class VMMStateManager:
                 logger.warning(f">> [VMM SAFETY GUARD]: Physical VRAM is high ({vram_check} MB). Cleansing non-target processes...")
                 for r in list(self.running_processes.keys()):
                     if r != target_model:
-                        self.evict_backend(r)
+                        self.hard_terminate_backend(r)
                 time.sleep(0.5)
 
-            # Launch target into clean VRAM
-            if target_model not in self.running_processes:
-                logger.info(f">> [VMM SWAP START]: Loading '{target_model}' into clean VRAM (<2.3s target)...")
-                loop = asyncio.get_event_loop()
+            # Activate target into clean VRAM
+            loop = asyncio.get_event_loop()
+            if target_model in self.running_processes and self.running_processes[target_model].poll() is None:
+                # Process is already running, wake it up via native cuMemMap (<2s)
+                logger.info(f">> [VMM SWAP START]: Waking '{target_model}' from host RAM into VRAM (<2.0s target)...")
+                wake_ok = await loop.run_in_executor(None, self.wake_backend, target_model)
+                if not wake_ok:
+                    logger.warning(f">> [VMM WAKE FALLBACK]: Wake endpoint failed, restarting '{target_model}'...")
+                    self.hard_terminate_backend(target_model)
+                    await loop.run_in_executor(None, self.start_backend, target_model)
+            else:
+                logger.info(f">> [VMM SWAP START]: Spawning fresh '{target_model}' backend into clean VRAM...")
                 await loop.run_in_executor(None, self.start_backend, target_model)
 
             self.active_vram_model = target_model
@@ -343,7 +406,7 @@ class VMMStateManager:
     def shutdown_all(self):
         logger.info("[VMM POOL] Shutting down all processes...")
         for role in list(self.running_processes.keys()):
-            self.evict_backend(role)
+            self.hard_terminate_backend(role)
 
 
 state = VMMStateManager()

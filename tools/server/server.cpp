@@ -303,6 +303,10 @@ int llama_server(common_params & params, int argc, char ** argv, server_child & 
     // Save & load slots
     ctx_http.get ("/slots",                    ex_wrapper(routes.get_slots));
     ctx_http.post("/slots/:id_slot",           ex_wrapper(routes.post_slots));
+    // VMM fast model swapping
+    ctx_http.post("/vmm/sleep",                ex_wrapper(routes.post_vmm_sleep));
+    ctx_http.post("/vmm/wake",                 ex_wrapper(routes.post_vmm_wake));
+    ctx_http.get ("/vmm/status",               ex_wrapper(routes.get_vmm_status));
 
     // resumable streaming: a child binds the local session factories, the router binds
     // proxies that resolve the owning child, see server-stream.h

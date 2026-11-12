@@ -8674,6 +8674,34 @@ void server_routes::init_routes() {
         res->ok(result->to_json());
         return res;
     };
+
+    this->post_vmm_sleep = [this](const server_http_req &) {
+        auto res = create_response(true);
+        queue_tasks.request_sleep_and_wait();
+        res->ok({
+            {"status", "sleeping"},
+            {"is_sleeping", queue_tasks.is_sleeping()}
+        });
+        return res;
+    };
+
+    this->post_vmm_wake = [this](const server_http_req &) {
+        auto res = create_response(true);
+        queue_tasks.wait_until_no_sleep();
+        res->ok({
+            {"status", "awake"},
+            {"is_sleeping", queue_tasks.is_sleeping()}
+        });
+        return res;
+    };
+
+    this->get_vmm_status = [this](const server_http_req &) {
+        auto res = create_response(true);
+        res->ok({
+            {"is_sleeping", queue_tasks.is_sleeping()}
+        });
+        return res;
+    };
 }
 
 std::unique_ptr<server_res_generator> server_routes::handle_slots_save(const server_http_req & req, int id_slot) {

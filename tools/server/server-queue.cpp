@@ -129,6 +129,19 @@ void server_queue::wait_until_no_sleep() {
     }
 }
 
+void server_queue::request_sleep_and_wait() {
+    std::unique_lock<std::mutex> lock(mutex_tasks);
+    if (sleeping) {
+        return;
+    }
+    QUE_INF("%s", "requesting to enter sleeping state (VMM sleep)\n");
+    req_start_sleeping = true;
+    condition_tasks.notify_all();
+    condition_tasks.wait(lock, [&]{
+        return sleeping || !running;
+    });
+}
+
 void server_queue::terminate() {
     std::unique_lock<std::mutex> lock(mutex_tasks);
     running = false;
@@ -295,6 +308,10 @@ void server_queue::start_loop(int64_t idle_sleep_ms) {
     constexpr auto max_wait_time = std::chrono::seconds(1);
     auto should_sleep = [&]() -> bool {
         // caller must hold mutex_tasks
+        if (req_start_sleeping) {
+            req_start_sleeping = false;
+            return true;
+        }
         if (idle_sleep_ms < 0) {
             return false;
         }
@@ -337,6 +354,7 @@ void server_queue::start_loop(int64_t idle_sleep_ms) {
                 for (auto & cb : callback_sleeping_state) {
                     cb(true);
                 }
+                condition_tasks.notify_all(); // notify request_sleep_and_wait()
                 req_stop_sleeping = false;
                 // wait until we are requested to exit sleeping state
                 condition_tasks.wait(lock, [&]{
@@ -358,7 +376,7 @@ void server_queue::start_loop(int64_t idle_sleep_ms) {
             } else {
                 // wait for new tasks or timeout for checking sleeping condition
                 bool res = condition_tasks.wait_for(lock, max_wait_time, [&]{
-                    return (!queue_tasks.empty() || !running);
+                    return (!queue_tasks.empty() || !running || req_start_sleeping);
                 });
                 if (res) {
                     break; // new task arrived or terminate
