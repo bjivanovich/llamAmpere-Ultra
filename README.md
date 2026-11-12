@@ -37,10 +37,14 @@
      - **128Exp Q3_K_M**: **48.87 - 49.14 tok/s** (TTFT 639.4 ms, peak VRAM 20,031 MB, 100% GPU residency with `LLAMA_MOE_ARENA=off`).
      - **160Exp Q3_K_M**: **45.13 - 45.94 tok/s** (TTFT 615.8 ms, peak VRAM 24,008 MB, 100% GPU residency with `LLAMA_MOE_ARENA=off`).
      - **128Exp Q4_K_M**: **35.97 - 36.17 tok/s** (TTFT 715.5 ms, peak VRAM 24,214 MB, 100% GPU residency with `LLAMA_MOE_ARENA=off`).
-4. **Enhanced CLI & Model Tuning Infrastructure**:
+4. **TurboQuant TQ4_1S & TQ3_1S dp4a Hardware Acceleration**:
+   - Native INT8 `dp4a` (`IDP4A`) tensor core emulation kernels for `TQ4_1S` (4.0 bpw) and `TQ3_1S` (3.25 bpw) with CUDA graph capturability and MoE dispatch.
+   - **Optimal 24 GB Sweet Spot (`120Exp-TQ4_1S`)**: **45.2 tok/s sustained decode** on RTX 3090 (20.72 GB VRAM, 3.85 GB free headroom, 96K context capable with `turbo4` KV cache). Delivers double the precision (+5.3 dB SNR) compared to Gyro-Coder TQ2_0 (2.0 bpw) with identical throughput.
+   - **Microarchitectural Analysis**: Verified `TQ4_1S` is 98% memory bandwidth-bound (saturating 936 GB/s GDDR6X) due to single-cycle hardware nibble permute (`PRMT`), whereas `TQ3_1S` becomes ALU compute-bound (~10.1 tok/s) due to non-aligned 3-bit unpacking arithmetic (~100 ALU ops per block). Full details in [docs/turboquant-dp4a-pruned-benchmarks.md](docs/turboquant-dp4a-pruned-benchmarks.md).
+5. **Enhanced CLI & Model Tuning Infrastructure**:
    - Universal `--override-kv` type parser supporting standard GGUF keys (`u32:`, `uint:`, `i32:`, `i64:`, `f32:`, `int:`, `str:`, `bool:`).
    - Native `--jinja` template engine integration for Qwen4Exp official chat templates.
-5. **Multi-Agent Infrastructure (Zero-Config)**:
+6. **Multi-Agent Infrastructure (Zero-Config)**:
    - `master_harness.py`: Supervisor CLI orchestrator with `--swap [on|off]`, `--check-memory`, and `--open-ui`.
    - `router/vmm_router.py`: OpenAI-compatible reverse proxy (`http://127.0.0.1:8000/v1`) with mutual exclusion (`asyncio.Lock`), strict VRAM eviction barrier (`<3000 MB`), and dynamic swap toggle.
    - `router/memory_advisor.py`: Engine-Aware Memory Budget Calculator & Windows WDDM 50% pinned RAM cap guardian.

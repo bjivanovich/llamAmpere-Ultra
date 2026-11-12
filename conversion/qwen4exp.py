@@ -104,8 +104,8 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
         _img = self._image_token_id()
         if _img is not None:
             self.gguf_writer.add_ple_image_token_id(int(_img))
-        if self._ple_row_dim is not None:
-            self.gguf_writer.add_embedding_length_per_layer_input(self._ple_row_dim)
+        row_dim = self._ple_row_dim or 160
+        self.gguf_writer.add_embedding_length_per_layer_input(int(row_dim))
 
         self.gguf_writer.add_ple_layer_multipliers(
             self._read_hash_constants("ple_embedding.layer_multipliers"))
