@@ -9,6 +9,7 @@
 #include "turbo-quant.cuh"
 #include "convert.cuh"
 #include "mmq.cuh"
+#include "tq3-lut.cuh"
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
 #define GGML_CUDA_USE_WMMA
@@ -111,26 +112,16 @@ __device__ __forceinline__ void tq4_cents8_reg(uint32_t four_bytes, int &c0, int
 // Fixed int8 centroid table: centroid_i8[i] = round(TQ3_CENTROIDS_WEIGHT[i] * 127 / 1.996684)
 static constexpr float TQ3_CENTROID_I8_RESCALE = 1.996684f / 127.0f;
 
-// Register-based centroid lookup for TQ3_1S:
+// LUT-accelerated centroid lookup for TQ3_1S:
 // Maps 3 packed qs bytes (24 bits = 8 x 3-bit indices) to two packed 4x int8 centroids for dp4a.
+// Uses tq3_sel_lut (8 KB) to eliminate ~26 ALU operations per call (~104 ALU ops per 32-weight block).
 __device__ __forceinline__ void tq3_cents8_reg(uint32_t three_bytes, int &c0, int &c1) {
-    // kvalues_tq3 has 8 int8 entries: [-127, -82, -47, -16, 15, 46, 81, 127]
-    // Packed into two 32-bit registers (lut0 for idx 0..3, lut1 for idx 4..7)
     constexpr uint32_t lut0 = 0xF0D1AE81u;
     constexpr uint32_t lut1 = 0x7F512E0Fu;
 
-    // Pack lower 4 indices (elements 0..3) into a 16-bit byte_perm selector (4 nibbles)
-    const uint32_t s0 = (three_bytes & 7u)
-                      | (((three_bytes >> 3)  & 7u) << 4)
-                      | (((three_bytes >> 6)  & 7u) << 8)
-                      | (((three_bytes >> 9)  & 7u) << 12);
-
-    // Pack upper 4 indices (elements 4..7) into a 16-bit byte_perm selector (4 nibbles)
-    const uint32_t p_hi = three_bytes >> 12;
-    const uint32_t s1 = (p_hi & 7u)
-                      | (((p_hi >> 3) & 7u) << 4)
-                      | (((p_hi >> 6) & 7u) << 8)
-                      | (((p_hi >> 9) & 7u) << 12);
+    // Fast 8 KB LUT lookup replaces bit-shifts and masks
+    const uint32_t s0 = tq3_sel_lut[three_bytes & 0x0FFFu];
+    const uint32_t s1 = tq3_sel_lut[three_bytes >> 12];
 
 #if defined(GGML_USE_HIP)
     c0 = (int) __builtin_amdgcn_perm(lut1, lut0, s0);

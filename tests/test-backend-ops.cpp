@@ -28,6 +28,7 @@
 #include <atomic>
 #include <array>
 #include <cfloat>
+#include <numeric>
 #include <cinttypes>
 #include <cstdarg>
 #include <cstdint>
@@ -21386,7 +21387,11 @@ static void usage(char ** argv) {
 // (ggml-ait.h) == Python decode, (2) the GPU mul_mat == host reference with the same activation emulation (rotate, x col
 // scale, int8 round trip per (token, 512 slice)) at N = 1-8, 33, 512, with 128-row slabs (8 slabs).
 static int run_ait_check(const char * dir) {
+#ifdef _WIN32
+    _putenv_s("GGML_CUDA_AIT_SLAB_MIB", "1");
+#else
     setenv("GGML_CUDA_AIT_SLAB_MIB", "1", 1);
+#endif
     ggml_backend_load_all();
     ggml_backend_dev_t dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
     if (!dev) { fprintf(stderr, "ait: no GPU backend\n"); return 1; }
