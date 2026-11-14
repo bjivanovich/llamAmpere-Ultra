@@ -2628,6 +2628,9 @@ bool llama_model_loader::load_all_data(
         if (overlay_idx >= 0 && overlay_idx < (int) files.size() && !getenv("LLAMA_MODEL_OVERLAY_KEEP_CACHE")) {
             posix_fadvise(files.at(overlay_idx)->file_id(), 0, 0, POSIX_FADV_DONTNEED);
         }
+#elif defined(_WIN32)
+        // Trim working set on Windows so file pages loaded to VRAM are returned to system RAM immediately
+        SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 #endif
         if (progress_callback) {
             // Even though the model is done loading, we still honor

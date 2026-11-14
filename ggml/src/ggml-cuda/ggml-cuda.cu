@@ -1403,13 +1403,6 @@ static ggml_backend_buffer_t ggml_backend_cuda_buffer_type_alloc_buffer(ggml_bac
         CUdeviceptr vaddr = 0;
         CUresult r_res = cuMemAddressReserve(&vaddr, aligned_size, 0, 0, 0);
         if (r_res == CUDA_SUCCESS) {
-            cudaError_t h_err = cudaHostAlloc(&host_mirror_pre, aligned_size, cudaHostAllocDefault);
-            if (h_err == cudaSuccess) {
-                GGML_LOG_INFO("%s: pre-allocated %.2f MiB pinned host mirror at %p\n",
-                              __func__, aligned_size / 1024.0 / 1024.0, host_mirror_pre);
-            } else {
-                GGML_LOG_WARN("%s: failed to pre-allocate pinned host mirror (err=%d)\n", __func__, (int)h_err);
-            }
             CUmemGenericAllocationHandle handle;
             CUresult c_res = cuMemCreate(&handle, aligned_size, &prop, 0);
             if (c_res == CUDA_SUCCESS) {
@@ -1422,11 +1415,9 @@ static ggml_backend_buffer_t ggml_backend_cuda_buffer_type_alloc_buffer(ggml_bac
                 CU_CHECK(cuMemSetAccess(vaddr, aligned_size, &access, 1));
                 dev_ptr = (void *)vaddr;
                 is_vmm = true;
-                GGML_LOG_INFO("%s: allocated %.2f MiB VMM sleepable buffer at %p (aligned %.2f MiB)\n",
+                GGML_LOG_INFO("%s: allocated %.2f MiB VMM sleepable buffer at %p (aligned %.2f MiB, host mirror deferred)\n",
                               __func__, size / 1024.0 / 1024.0, dev_ptr, aligned_size / 1024.0 / 1024.0);
             } else {
-                if (host_mirror_pre) cudaFreeHost(host_mirror_pre);
-                host_mirror_pre = nullptr;
                 cuMemAddressFree(vaddr, aligned_size);
             }
         }
@@ -1656,6 +1647,20 @@ bool ggml_backend_cuda_buffer_context::wake() {
     double gb_sec = (size / (1024.0 * 1024.0 * 1024.0)) / (dma_sec > 0.0001 ? dma_sec : 0.0001);
     GGML_LOG_INFO("VMM wake: restored %.2f MiB in %.2f ms (map: %.2f ms, DMA: %.2f ms, %.2f GB/s)\n",
                   size / 1024.0 / 1024.0, (t1 - t0) / 1000.0, (t_map - t0) / 1000.0, (t1 - t_map) / 1000.0, gb_sec);
+
+#if defined(_WIN32)
+    // Windows WDDM 50% pinned RAM cap: free host mirror after restoring to VRAM
+    // so active model consumes 0 MB pinned host RAM, leaving full headroom to preload next model.
+    const char * release_env = getenv("LLAMA_VMM_RELEASE_HOST");
+    if ((release_env == nullptr || release_env[0] != '0') && host_mirror) {
+        cudaFreeHost(host_mirror);
+        host_mirror = nullptr;
+        mirror_captured = false;
+        GGML_LOG_INFO("VMM wake: freed pinned host mirror to reclaim %.2f MiB system RAM\n",
+                      aligned_size / 1024.0 / 1024.0);
+    }
+#endif
+
     return true;
 }
 
